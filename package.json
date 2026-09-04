@@ -1,0 +1,31 @@
+{
+  "name": "rps-card-game",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n server,client -c magenta,cyan \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "npm run dev -w @rps/server",
+    "dev:client": "npm run dev -w @rps/client",
+    "build": "npm run build -w @rps/server && npm run build -w @rps/client",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start": "npm run start -w @rps/server"
+  },
+  "devDependencies": {
+    "concurrently": "10.0.5",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "overrides": {
+    "esbuild": "0.28.2"
+  }
+}

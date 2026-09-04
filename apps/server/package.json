@@ -1,0 +1,25 @@
+{
+  "name": "@rps/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node24 --format=esm --outdir=dist --sourcemap --external:express --external:socket.io",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@rps/game-core": "*",
+    "@rps/protocol": "*",
+    "express": "5.2.1",
+    "socket.io": "4.8.3"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.6",
+    "@types/node": "26.4.0",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2"
+  }
+}
