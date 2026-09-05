@@ -477,10 +477,7 @@ function beginNextTurn(state: MatchState, now: number): void {
 
 export function startDiscardPhase(state: MatchState, now: number): void {
   if (state.phase !== "battle" || !state.battle) {
-    throw new RuleError("Discard phase can only begin after a surviving battle.");
-  }
-  if (state.battle.eliminatedIds.length > 0) {
-    throw new RuleError("A duel with an elimination skips the shuffle phase.");
+    throw new RuleError("Discard phase can only begin after a completed battle.");
   }
   const duelists = activeDuelists(state);
   const drawCounts: [number, number] = [
@@ -489,6 +486,15 @@ export function startDiscardPhase(state: MatchState, now: number): void {
   ];
   for (let index = 0; index < 2; index += 1) {
     const player = duelists[index]!;
+    if (player.eliminated) {
+      player.drawnCardIds = [];
+      player.requiredDiscards = 0;
+      player.discardSelection = [];
+      player.locked = true;
+      player.extraDrawPurchased = false;
+      player.slots = EMPTY_SLOTS();
+      continue;
+    }
     const originalSize = player.hand.length;
     player.drawnCardIds = [];
     for (let drawIndex = 0; drawIndex < drawCounts[index]!; drawIndex += 1) {
@@ -510,8 +516,7 @@ export function advanceBattle(state: MatchState, now: number): void {
   if (state.phase !== "battle" || !state.battle) {
     throw new RuleError("Only a completed battle can advance.");
   }
-  if (state.battle.eliminatedIds.length > 0) beginNextTurn(state, now);
-  else startDiscardPhase(state, now);
+  startDiscardPhase(state, now);
 }
 
 export function purchaseExtraDraw(state: MatchState, playerId: PlayerId): Card {

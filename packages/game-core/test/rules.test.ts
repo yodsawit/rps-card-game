@@ -202,7 +202,7 @@ describe("RPS rules", () => {
     expect(state.battle?.lanes[0].tripleOverride).toBe(true);
   });
 
-  it("recycles an eliminated hand and advances to the next clockwise living attacker", () => {
+  it("lets a surviving duelist draw and discard before advancing after an elimination", () => {
     const state = makeMatch(3);
     startDuel(state, "p1");
     giveSymbols(state, ["rock", "paper", "scissors"], ["scissors", "rock", "paper"]);
@@ -213,6 +213,12 @@ describe("RPS rules", () => {
     expect(player(state, "p1").hand).toHaveLength(0);
     expect(countAllCards(state)).toBe(21);
     advanceBattle(state, 15_000);
+    expect(state.phase).toBe("discard");
+    expect(player(state, "p0").drawnCardIds.length).toBeGreaterThan(0);
+    expect(player(state, "p1").drawnCardIds).toHaveLength(0);
+    expect(player(state, "p1").locked).toBe(true);
+    autoCompleteDiscards(state);
+    finalizeDiscards(state, 16_000, seededRandom(8));
     expect(state.phase).toBe("targeting");
     expect(state.attackerId).toBe("p2");
     expect(state.defenderId).toBeNull();
