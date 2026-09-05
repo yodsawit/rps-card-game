@@ -1,14 +1,19 @@
 export const CARD_SYMBOLS = ["rock", "paper", "scissors"] as const;
 
 export type CardSymbol = (typeof CARD_SYMBOLS)[number];
+export type BotDifficulty = "basic" | "advanced";
 export type PlayerId = string;
 export type PreparationLane = 0 | 1 | 2;
 export type LaneResult = "win" | "loss" | "draw";
 export type MatchPhase =
+  | "targeting"
   | "preparation"
   | "battle"
   | "discard"
   | "finished";
+
+export const MIN_SEATS = 2;
+export const MAX_SEATS = 6;
 
 export interface Card {
   readonly id: string;
@@ -36,6 +41,7 @@ export interface PlayerState {
   extraDrawPurchased: boolean;
   noLossBonus: boolean;
   rematchRequested: boolean;
+  eliminated: boolean;
 }
 
 export interface BattleSide {
@@ -61,15 +67,18 @@ export interface MatchOutcome {
 
 export interface BattleSummary {
   round: number;
+  duelistIds: [PlayerId, PlayerId];
   lanes: [BattleLane, BattleLane, BattleLane];
   unassignedLost: [number, number];
   noLoss: [boolean, boolean];
   resultingHp: [number, number];
+  eliminatedIds: PlayerId[];
 }
 
 export interface GameConfig {
   startingHp: number;
   preparationMs: number;
+  targetSelectionMs: number;
   battleRevealMs: number;
   discardMs: number;
   reconnectMs: number;
@@ -80,13 +89,14 @@ export interface GameConfig {
 
 export const DEFAULT_GAME_CONFIG: Readonly<GameConfig> = {
   startingHp: 10,
+  targetSelectionMs: 20_000,
   preparationMs: 20_000,
   // The client resolves the three lanes in about 4.35 seconds, then holds the
   // completed battle for five seconds before the server advances.
   battleRevealMs: 10_000,
   discardMs: 20_000,
   reconnectMs: 30_000,
-  copiesPerSymbol: 5,
+  copiesPerSymbol: 6,
   startingHandSize: 3,
   maximumHandSize: 5
 };
@@ -98,7 +108,9 @@ export interface MatchState {
   phase: MatchPhase;
   deadlineAt: number | null;
   deck: Card[];
-  players: [PlayerState, PlayerState];
+  players: PlayerState[];
+  attackerId: PlayerId;
+  defenderId: PlayerId | null;
   battle: BattleSummary | null;
   outcome: MatchOutcome | null;
   config: GameConfig;

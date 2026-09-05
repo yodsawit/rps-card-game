@@ -1,266 +1,290 @@
 import { describe, expect, it } from "vitest";
 import {
   adjustSlotHearts,
+  advanceBattle,
   advancePreparationPair,
-  allPlayersLocked,
   assertMatchInvariants,
   autoCompleteDiscards,
+  autoCompletePreparationPair,
   compareSymbols,
+  countAllCards,
   createMatch,
+  duelistsLocked,
   finalizeDiscards,
+  forfeitPlayers,
   lockPlayer,
   purchaseExtraDraw,
   seededRandom,
+  selectOpponent,
   setCardPlacement,
   setDiscardSelection,
   startDiscardPhase,
-  type MatchState
+  type CardSymbol,
+  type MatchState,
+  type PlayerState
 } from "../src/index.js";
 
-function match(seed = 7): MatchState {
+const NOW = 1_000;
+
+function makeMatch(seats = 2, seed = 7): MatchState {
   return createMatch(
-    "test",
-    [
-      { id: "left", name: "Left" },
-      { id: "right", name: "Right" }
-    ],
-    1_000,
+    "match",
+    Array.from({ length: seats }, (_, index) => ({ id: `p${index}`, name: `Player ${index + 1}` })),
+    NOW,
     seededRandom(seed)
   );
 }
 
-function giveSymbols(state: MatchState, left: string[], right: string[]): void {
-  const allCards = [...state.deck, ...state.players.flatMap((player) => player.hand)];
-  const used = new Set<string>();
-  const take = (symbol: string) => {
-    const card = allCards.find((candidate) => candidate.symbol === symbol && !used.has(candidate.id));
-    if (!card) throw new Error(`Missing ${symbol}`);
-    used.add(card.id);
+function player(state: MatchState, id: string): PlayerState {
+  return state.players.find((candidate) => candidate.id === id)!;
+}
+
+function startDuel(state: MatchState, defenderId = "p1"): void {
+  selectOpponent(state, state.attackerId, defenderId, NOW + 1);
+}
+
+function giveSymbols(
+  state: MatchState,
+  leftSymbols: readonly CardSymbol[],
+  rightSymbols: readonly CardSymbol[]
+): void {
+  const [left, right] = [player(state, state.attackerId), player(state, state.defenderId!)];
+  const allCards = [...state.deck, ...state.players.flatMap((candidate) => candidate.hand)];
+  const reservedIds = new Set(
+    state.players
+      .filter((candidate) => candidate.id !== left.id && candidate.id !== right.id)
+      .flatMap((candidate) => candidate.hand.map((card) => card.id))
+  );
+  const take = (symbol: CardSymbol) => {
+    const card = allCards.find((candidate) => candidate.symbol === symbol && !reservedIds.has(candidate.id));
+    if (!card) throw new Error(`No ${symbol} card remains for the test.`);
+    reservedIds.add(card.id);
     return card;
   };
-  state.players[0].hand = left.map(take);
-  state.players[1].hand = right.map(take);
-  state.deck = allCards.filter((card) => !used.has(card.id));
+  left.hand = leftSymbols.map(take);
+  right.hand = rightSymbols.map(take);
+  state.deck = allCards.filter((card) => !reservedIds.has(card.id));
+  assertMatchInvariants(state);
 }
 
-function prepareAll(
-  state: MatchState,
-  leftHearts: [number, number],
-  rightHearts: [number, number],
-  now = 2_000
-) {
-  let battle = null;
-  for (let lane = 0; lane < 3; lane += 1) {
-    for (const playerIndex of [0, 1] as const) {
-      const player = state.players[playerIndex];
-      setCardPlacement(state, player.id, lane, player.hand[lane]!.id);
-      const hearts = playerIndex === 0 ? leftHearts[lane] : rightHearts[lane];
-      if (lane < 2 && hearts) adjustSlotHearts(state, player.id, lane, hearts);
-      lockPlayer(state, player.id);
+function commitLane(state: MatchState, allocations: readonly [number, number], now: number): void {
+  const lane = state.preparationLane;
+  const duelists = [player(state, state.attackerId), player(state, state.defenderId!)];
+  for (let index = 0; index < duelists.length; index += 1) {
+    const duelist = duelists[index]!;
+    setCardPlacement(state, duelist.id, lane, duelist.hand[lane]!.id);
+    if (lane < 2 && allocations[index]! > 0) {
+      adjustSlotHearts(state, duelist.id, lane, allocations[index]!);
     }
-    battle = advancePreparationPair(state, now + lane);
+    lockPlayer(state, duelist.id);
   }
-  if (!battle) throw new Error("Preparation did not resolve after the third pair.");
-  return battle;
+  expect(duelistsLocked(state)).toBe(true);
+  advancePreparationPair(state, now, seededRandom(now));
 }
 
-describe("RPS comparison", () => {
+function resolveDuel(
+  state: MatchState,
+  leftAllocations: readonly [number, number] = [4, 3],
+  rightAllocations: readonly [number, number] = [4, 3]
+): void {
+  commitLane(state, [leftAllocations[0], rightAllocations[0]], 2_000);
+  commitLane(state, [leftAllocations[1], rightAllocations[1]], 3_000);
+  commitLane(state, [0, 0], 4_000);
+}
+
+describe("RPS rules", () => {
   it.each([
     ["rock", "scissors", "win"],
     ["scissors", "paper", "win"],
     ["paper", "rock", "win"],
     ["rock", "paper", "loss"],
     ["rock", "rock", "draw"]
-  ] as const)("resolves %s against %s", (left, right, expected) => {
+  ] as const)("compares %s against %s as %s", (left, right, expected) => {
     expect(compareSymbols(left, right)).toBe(expected);
   });
-});
 
-describe("battle resolution", () => {
-  it("transfers loser HP minus one and burns unassigned HP", () => {
-    const state = match();
-    giveSymbols(state, ["rock", "paper", "scissors"], ["scissors", "paper", "paper"]);
-    const battle = prepareAll(state, [4, 3], [3, 2]);
-
-    expect(battle.lanes.map((lane) => lane.sides[0].result)).toEqual(["win", "draw", "win"]);
-    expect(battle.unassignedLost).toEqual([0, 0]);
-    expect(battle.resultingHp).toEqual([16, 2]);
-    expect(state.players.map((player) => player.hp)).toEqual([16, 2]);
-    expect(state.phase).toBe("battle");
-    expect(state.deadlineAt).toBe(12_002);
+  it.each([2, 3, 4, 5, 6])("creates a %i-seat deck with seats + 4 copies per symbol", (seats) => {
+    const state = makeMatch(seats);
+    expect(state.phase).toBe("targeting");
+    expect(state.attackerId).toBe("p0");
+    expect(state.defenderId).toBeNull();
+    expect(state.config.copiesPerSymbol).toBe(seats + 4);
+    expect(countAllCards(state)).toBe((seats + 4) * 3);
+    const allCards = [...state.deck, ...state.players.flatMap((candidate) => candidate.hand)];
+    expect(["rock", "paper", "scissors"].map((symbol) =>
+      allCards.filter((card) => card.symbol === symbol).length
+    )).toEqual([seats + 4, seats + 4, seats + 4]);
+    expect(state.players.every((candidate) => candidate.hand.length === 3)).toBe(true);
     assertMatchInvariants(state);
   });
 
-  it("turns a triple's matching pair into a win", () => {
-    const state = match();
-    giveSymbols(state, ["rock", "rock", "rock"], ["rock", "paper", "scissors"]);
-    const battle = prepareAll(state, [4, 3], [4, 3]);
+  it("lets only the clockwise attacker choose a different living opponent", () => {
+    const state = makeMatch(4);
+    expect(() => selectOpponent(state, "p1", "p2", NOW)).toThrow("active attacker");
+    expect(() => selectOpponent(state, "p0", "p0", NOW)).toThrow("different living opponent");
 
-    expect(battle.lanes.map((lane) => lane.sides[0].result)).toEqual(["win", "loss", "win"]);
-    expect(battle.lanes[0].tripleOverride).toBe(true);
-  });
-
-  it("counts two empty positions as losses for both", () => {
-    const state = match();
-    let battle = null;
-    for (let lane = 0; lane < 3; lane += 1) {
-      lockPlayer(state, "left");
-      lockPlayer(state, "right");
-      battle = advancePreparationPair(state, 2_000 + lane);
-    }
-    if (!battle) throw new Error("Empty preparation did not resolve.");
-
-    expect(battle.lanes.every((lane) => lane.sides[0].result === "loss")).toBe(true);
-    expect(battle.lanes.every((lane) => lane.sides[1].result === "loss")).toBe(true);
-    expect(state.outcome).toEqual({ kind: "draw", winnerId: null, reason: "hp" });
-  });
-
-  it("allows both players to lock preparation early", () => {
-    const state = match();
-    lockPlayer(state, "left");
-    expect(allPlayersLocked(state)).toBe(false);
-    lockPlayer(state, "right");
-    expect(allPlayersLocked(state)).toBe(true);
-    advancePreparationPair(state, 1_100);
-    expect(state.preparationLane).toBe(1);
-    expect(state.players.every((player) => !player.locked)).toBe(true);
-  });
-
-  it("locks prior pairs and assigns every remaining HP to the final pair", () => {
-    const state = match();
-    const [left, right] = state.players;
-    setCardPlacement(state, left.id, 0, left.hand[0]!.id);
-    setCardPlacement(state, right.id, 0, right.hand[0]!.id);
-    adjustSlotHearts(state, left.id, 0, 6);
-    adjustSlotHearts(state, right.id, 0, 2);
-    lockPlayer(state, left.id);
-    lockPlayer(state, right.id);
-    advancePreparationPair(state, 2_000);
-
-    expect(() => setCardPlacement(state, left.id, 0, left.hand[1]!.id)).toThrow(/current battle pair/i);
-    setCardPlacement(state, left.id, 1, left.hand[1]!.id);
-    setCardPlacement(state, right.id, 1, right.hand[1]!.id);
-    adjustSlotHearts(state, left.id, 1, 1);
-    adjustSlotHearts(state, right.id, 1, 3);
-    lockPlayer(state, left.id);
-    lockPlayer(state, right.id);
-    advancePreparationPair(state, 2_100);
-
-    setCardPlacement(state, left.id, 2, left.hand[2]!.id);
-    setCardPlacement(state, right.id, 2, right.hand[2]!.id);
-    expect(left.slots[2].hearts).toBe(3);
-    expect(right.slots[2].hearts).toBe(5);
-    expect(() => adjustSlotHearts(state, left.id, 2, 1)).toThrow(/automatically/i);
-  });
-
-  it("awards no enemy HP when the loser risked one or less", () => {
-    const state = match();
-    giveSymbols(state, ["rock", "paper", "scissors"], ["scissors", "rock", "paper"]);
-    const battle = prepareAll(state, [10, 0], [1, 9]);
-
-    expect(battle.lanes[0].sides[0].receivedHp).toBe(10);
-    expect(battle.lanes[2].sides[0].receivedHp).toBe(0);
-  });
-});
-
-describe("discard phase", () => {
-  it("draws for both players before returning and shuffling discards", () => {
-    const state = match(12);
-    giveSymbols(state, ["rock", "paper", "scissors"], ["rock", "paper", "scissors"]);
-    prepareAll(state, [4, 3], [4, 3]);
-    expect(state.players.every((player) => player.noLossBonus)).toBe(true);
-
-    startDiscardPhase(state, 7_000);
-
-    expect(state.players.map((player) => player.hand.length)).toEqual([5, 5]);
-    expect(state.players.map((player) => player.requiredDiscards)).toEqual([1, 1]);
-    expect(state.deck).toHaveLength(5);
-    setDiscardSelection(state, "left", [state.players[0].hand[4]!.id]);
-    setDiscardSelection(state, "right", [state.players[1].hand[4]!.id]);
-    lockPlayer(state, "left");
-    lockPlayer(state, "right");
-    finalizeDiscards(state, 8_000, seededRandom(5));
-
+    selectOpponent(state, "p0", "p3", NOW);
     expect(state.phase).toBe("preparation");
-    expect(state.players.map((player) => player.hand.length)).toEqual([4, 4]);
-    expect(state.deck).toHaveLength(7);
+    expect(state.defenderId).toBe("p3");
+  });
+
+  it("makes both the card and every committed heart irreversible", () => {
+    const state = makeMatch();
+    startDuel(state);
+    const first = player(state, "p0");
+    setCardPlacement(state, "p0", 0, first.hand[0]!.id);
+    setCardPlacement(state, "p0", 0, first.hand[0]!.id);
+    expect(() => setCardPlacement(state, "p0", 0, first.hand[1]!.id)).toThrow("cannot be replaced");
+    expect(() => setCardPlacement(state, "p0", 0, null as unknown as string)).toThrow();
+    adjustSlotHearts(state, "p0", 0, 3);
+    expect(() => adjustSlotHearts(state, "p0", 0, -1)).toThrow("only increase");
+    expect(first.slots[0]).toMatchObject({ cardId: first.hand[0]!.id, hearts: 3 });
+  });
+
+  it("commits pairs left-to-right and puts every remaining heart on pair three", () => {
+    const state = makeMatch();
+    startDuel(state);
+    commitLane(state, [4, 2], 2_000);
+    expect(state.preparationLane).toBe(1);
+    expect(player(state, "p0").locked).toBe(false);
+    commitLane(state, [1, 5], 3_000);
+    expect(state.preparationLane).toBe(2);
+    commitLane(state, [0, 0], 4_000);
+
+    expect(player(state, "p0").slots.map((slot) => slot.hearts)).toEqual([4, 1, 5]);
+    expect(player(state, "p1").slots.map((slot) => slot.hearts)).toEqual([2, 5, 3]);
+  });
+
+  it("uses each duelist's leftmost uncommitted card on pair timeout without changing early HP", () => {
+    const state = makeMatch();
+    startDuel(state);
+    const first = player(state, "p0");
+    const second = player(state, "p1");
+    const firstOrder = first.hand.map((card) => card.id);
+    const secondOrder = second.hand.map((card) => card.id);
+
+    autoCompletePreparationPair(state);
+    expect(first.slots[0]).toEqual({ cardId: firstOrder[0], hearts: 0 });
+    expect(second.slots[0]).toEqual({ cardId: secondOrder[0], hearts: 0 });
+    advancePreparationPair(state, 2_000, seededRandom(2));
+
+    setCardPlacement(state, first.id, 1, firstOrder[2]!);
+    adjustSlotHearts(state, first.id, 1, 3);
+    autoCompletePreparationPair(state);
+    expect(first.slots[1]).toEqual({ cardId: firstOrder[2], hearts: 3 });
+    expect(second.slots[1]).toEqual({ cardId: secondOrder[1], hearts: 0 });
+    advancePreparationPair(state, 3_000, seededRandom(3));
+
+    autoCompletePreparationPair(state);
+    expect(first.slots[2]).toEqual({ cardId: firstOrder[1], hearts: 7 });
+    expect(second.slots[2]).toEqual({ cardId: secondOrder[2], hearts: 10 });
+  });
+
+  it("transfers losing stakes minus one and returns each winner's own stake", () => {
+    const state = makeMatch();
+    startDuel(state);
+    giveSymbols(state, ["rock", "paper", "scissors"], ["scissors", "rock", "paper"]);
+    resolveDuel(state);
+
+    expect(state.phase).toBe("finished");
+    expect(state.outcome).toMatchObject({ kind: "winner", winnerId: "p0", reason: "hp" });
+    expect(player(state, "p0").hp).toBe(17);
+    expect(player(state, "p1").hp).toBe(0);
+  });
+
+  it("turns equal-symbol draws into wins for the sole triple player", () => {
+    const state = makeMatch();
+    startDuel(state);
+    giveSymbols(state, ["rock", "rock", "rock"], ["rock", "paper", "scissors"]);
+    resolveDuel(state);
+
+    expect(state.battle?.lanes.map((lane) => lane.sides[0].result)).toEqual(["win", "loss", "win"]);
+    expect(state.battle?.lanes[0].tripleOverride).toBe(true);
+  });
+
+  it("recycles an eliminated hand and advances to the next clockwise living attacker", () => {
+    const state = makeMatch(3);
+    startDuel(state, "p1");
+    giveSymbols(state, ["rock", "paper", "scissors"], ["scissors", "rock", "paper"]);
+    resolveDuel(state);
+
+    expect(state.phase).toBe("battle");
+    expect(player(state, "p1").eliminated).toBe(true);
+    expect(player(state, "p1").hand).toHaveLength(0);
+    expect(countAllCards(state)).toBe(21);
+    advanceBattle(state, 15_000);
+    expect(state.phase).toBe("targeting");
+    expect(state.attackerId).toBe("p2");
+    expect(state.defenderId).toBeNull();
     assertMatchInvariants(state);
   });
 
-  it("auto-discards newest draws on timeout", () => {
-    const state = match(18);
-    giveSymbols(state, ["rock", "paper", "scissors"], ["rock", "paper", "scissors"]);
-    prepareAll(state, [4, 3], [4, 3]);
-    startDiscardPhase(state, 7_000);
-    const newest = state.players.map((player) => player.drawnCardIds.at(-1));
+  it("declares a draw when both final players reach zero HP", () => {
+    const state = makeMatch();
+    startDuel(state);
+    for (const duelist of state.players) duelist.hp = 0;
+    resolveDuel(state, [0, 0], [0, 0]);
+    expect(state.outcome).toMatchObject({ kind: "draw", winnerId: null, reason: "hp" });
+  });
 
+  it("draws and discards only for the two active duelists", () => {
+    const state = makeMatch(3);
+    startDuel(state, "p2");
+    giveSymbols(state, ["rock", "paper", "scissors"], ["paper", "rock", "scissors"]);
+    const spectatorHand = player(state, "p1").hand.map((card) => card.id);
+    resolveDuel(state);
+    expect(state.phase).toBe("battle");
+    startDiscardPhase(state, 12_000);
+
+    expect(player(state, "p0").drawnCardIds.length).toBeGreaterThan(0);
+    expect(player(state, "p2").drawnCardIds.length).toBeGreaterThan(0);
+    expect(player(state, "p1").hand.map((card) => card.id)).toEqual(spectatorHand);
     autoCompleteDiscards(state);
-
-    expect(state.players.map((player) => player.discardSelection[0])).toEqual(newest);
-    expect(allPlayersLocked(state)).toBe(true);
-  });
-
-  it("spends one HP for one extra draw and one extra required discard", () => {
-    const state = match(31);
-    giveSymbols(state, ["rock", "paper", "scissors"], ["rock", "paper", "scissors"]);
-    prepareAll(state, [4, 3], [4, 3]);
-    startDiscardPhase(state, 7_000);
-    const player = state.players[0];
-    const before = {
-      hp: player.hp,
-      hand: player.hand.length,
-      deck: state.deck.length,
-      required: player.requiredDiscards,
-      draws: player.drawnCardIds.length
-    };
-
-    const card = purchaseExtraDraw(state, player.id);
-
-    expect(player.hp).toBe(before.hp - 1);
-    expect(player.hand).toHaveLength(before.hand + 1);
-    expect(state.deck).toHaveLength(before.deck - 1);
-    expect(player.requiredDiscards).toBe(before.required + 1);
-    expect(player.drawnCardIds).toHaveLength(before.draws + 1);
-    expect(player.drawnCardIds.at(-1)).toBe(card.id);
-    expect(player.extraDrawPurchased).toBe(true);
-    expect(() => purchaseExtraDraw(state, player.id)).toThrow(/already been purchased/i);
+    finalizeDiscards(state, 13_000, seededRandom(1));
+    expect(state.phase).toBe("targeting");
+    expect(state.attackerId).toBe("p1");
+    expect(player(state, "p1").hand.map((card) => card.id)).toEqual(spectatorHand);
     assertMatchInvariants(state);
   });
 
-  it("does not allow the extra draw to spend a player's final HP", () => {
-    const state = match(32);
-    state.phase = "discard";
-    state.players[0].hp = 1;
-    const handSize = state.players[0].hand.length;
-    const deckSize = state.deck.length;
+  it("charges one HP and one extra discard for the optional extra draw", () => {
+    const state = makeMatch();
+    startDuel(state);
+    giveSymbols(state, ["rock", "paper", "scissors"], ["paper", "rock", "scissors"]);
+    resolveDuel(state);
+    advanceBattle(state, 12_000);
+    const first = player(state, "p0");
+    const hpBefore = first.hp;
+    const discardBefore = first.requiredDiscards;
+    const drawn = purchaseExtraDraw(state, "p0");
 
-    expect(() => purchaseExtraDraw(state, "left")).toThrow(/at least 2 HP/i);
-    expect(state.players[0].hp).toBe(1);
-    expect(state.players[0].hand).toHaveLength(handSize);
-    expect(state.deck).toHaveLength(deckSize);
+    expect(first.hp).toBe(hpBefore - 1);
+    expect(first.requiredDiscards).toBe(discardBefore + 1);
+    expect(first.drawnCardIds).toContain(drawn.id);
+    expect(() => purchaseExtraDraw(state, "p0")).toThrow("already been purchased");
   });
 
-  it("resolves simultaneous five-of-a-kind with normal RPS", () => {
-    const state = match(22);
-    const allCards = [...state.deck, ...state.players.flatMap((player) => player.hand)];
-    const rocks = allCards.filter((card) => card.symbol === "rock");
-    const papers = allCards.filter((card) => card.symbol === "paper");
-    const scissors = allCards.filter((card) => card.symbol === "scissors");
-    state.players[0].hand = [...rocks, papers[0]!];
-    state.players[1].hand = [...scissors, papers[1]!];
-    state.deck = papers.slice(2);
-    state.phase = "discard";
-    state.players[0].requiredDiscards = 1;
-    state.players[1].requiredDiscards = 1;
-    state.players[0].discardSelection = [papers[0]!.id];
-    state.players[1].discardSelection = [papers[1]!.id];
-    state.players[0].locked = true;
-    state.players[1].locked = true;
-
-    const outcome = finalizeDiscards(state, 9_000, seededRandom(1));
-
-    expect(outcome).toMatchObject({ kind: "winner", winnerId: "left", reason: "showdown" });
-    expect(state.deck).toHaveLength(5);
+  it("forfeits one group seat without ending a three-player match", () => {
+    const state = makeMatch(3);
+    forfeitPlayers(state, ["p2"], 2_000, seededRandom(2));
+    expect(state.phase).toBe("targeting");
+    expect(player(state, "p2").eliminated).toBe(true);
+    expect(player(state, "p2").hand).toHaveLength(0);
+    expect(state.outcome).toBeNull();
     assertMatchInvariants(state);
+  });
+
+  it("requires exact discard selection before a player can lock", () => {
+    const state = makeMatch();
+    startDuel(state);
+    giveSymbols(state, ["rock", "paper", "scissors"], ["paper", "rock", "scissors"]);
+    resolveDuel(state);
+    if (state.phase === "finished") throw new Error("Test duel unexpectedly ended the match.");
+    advanceBattle(state, 12_000);
+    const first = player(state, "p0");
+    expect(() => lockPlayer(state, first.id)).toThrow("required discard");
+    setDiscardSelection(state, first.id, first.hand.slice(0, first.requiredDiscards).map((card) => card.id));
+    lockPlayer(state, first.id);
+    expect(first.locked).toBe(true);
   });
 });

@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: rps-card-game
+    runtime: node
+    region: singapore
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "24.14.1"
+      - key: RPS_STUDY_LOG
+        value: "off"

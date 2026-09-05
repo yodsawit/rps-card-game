@@ -5,6 +5,7 @@ import type {
   Ack,
   BattleSideView,
   ClientToServerEvents,
+  LobbySnapshot,
   MatchSnapshot,
   PublicPlayerView,
   ServerSnapshot,
@@ -71,6 +72,7 @@ function cardBack(): string {
 }
 
 function phaseLabel(phase: MatchSnapshot["phase"]): string {
+  if (phase === "targeting") return "CHOOSE TARGET";
   if (phase === "preparation") return "PREPARE";
   if (phase === "battle") return "REVEAL";
   if (phase === "discard") return "RESHUFFLE";
@@ -101,7 +103,7 @@ class RpsClient {
         this.snapshot.phase === "finished" &&
         snapshot.kind === "match" &&
         snapshot.roomCode === this.snapshot.roomCode &&
-        snapshot.phase === "preparation" &&
+        snapshot.phase === "targeting" &&
         snapshot.round === 1
       ) {
         this.completedBattleSequences.clear();
@@ -143,7 +145,7 @@ class RpsClient {
       return;
     }
     if (this.snapshot.kind === "lobby") {
-      this.renderWaitingRoom(this.snapshot.roomCode, this.snapshot.players[0]?.name ?? "Player");
+      this.renderWaitingRoom(this.snapshot);
       return;
     }
     this.renderMatch(this.snapshot);
@@ -161,23 +163,19 @@ class RpsClient {
         <section class="lobby-panel glass-panel">
           <label class="field-label" for="player-name">CALLSIGN</label>
           <input id="player-name" maxlength="18" autocomplete="nickname" value="${savedName}" placeholder="Player name" />
-          <button class="primary wide" data-action="computer">
-            <span>PLAY VS COMPUTER</span><small>Instant private match</small>
-          </button>
-          <button class="secondary wide" data-action="create">
-            <span>CREATE ONLINE ROOM</span><small>Invite with a five-character code</small>
+          <button class="primary wide" data-action="create">
+            <span>CREATE ROOM</span><small>Invite players or add computer seats</small>
           </button>
           <div class="join-row">
             <input id="room-code" maxlength="5" autocomplete="off" placeholder="ROOM CODE" />
             <button class="ghost" data-action="join">JOIN</button>
           </div>
-          <div class="rules-strip"><span>15 CARDS</span><span>3 LANES</span><span>20 SECONDS</span></div>
+          <div class="rules-strip"><span>2–6 SEATS</span><span>3 PAIRS</span><span>20 SECONDS</span></div>
         </section>
       </main>
       <footer class="landing-footer">ROCK BREAKS SCISSORS · SCISSORS CUT PAPER · PAPER COVERS ROCK</footer>
     `;
-    app.querySelector<HTMLElement>("[data-action='computer']")?.addEventListener("click", () => this.create(true));
-    app.querySelector<HTMLElement>("[data-action='create']")?.addEventListener("click", () => this.create(false));
+    app.querySelector<HTMLElement>("[data-action='create']")?.addEventListener("click", () => this.create());
     app.querySelector<HTMLElement>("[data-action='join']")?.addEventListener("click", () => this.join());
     app.querySelector<HTMLInputElement>("#room-code")?.addEventListener("input", (event) => {
       const target = event.currentTarget as HTMLInputElement;
@@ -189,9 +187,9 @@ class RpsClient {
     return app.querySelector<HTMLInputElement>("#player-name")?.value.trim() ?? "";
   }
 
-  private create(versusComputer: boolean): void {
+  private create(): void {
     const name = this.playerName();
-    this.socket.emit("room:create", { name, versusComputer }, (result) => {
+    this.socket.emit("room:create", { name }, (result) => {
       this.handleReceipt(result, name);
     });
   }
@@ -212,46 +210,91 @@ class RpsClient {
     this.remember(result.data, name);
   }
 
-  private renderWaitingRoom(roomCode: string, name: string): void {
+  private renderWaitingRoom(view: LobbySnapshot): void {
+    const isHost = view.selfPlayerId === view.hostPlayerId;
+    const self = view.players.find((player) => player.id === view.selfPlayerId)!;
+    const seats = Array.from({ length: view.maximumSeats }, (_, seatIndex) => {
+      const player = view.players.find((candidate) => candidate.seatIndex === seatIndex);
+      if (!player) {
+        return `<li class="lobby-seat empty-seat"><span>${seatIndex + 1}</span><div><strong>OPEN SEAT</strong><small>Waiting for player or bot</small></div></li>`;
+      }
+      return `
+        <li class="lobby-seat ${player.id === view.hostPlayerId ? "host-seat" : ""}">
+          <span>${seatIndex + 1}</span>
+          <i class="connection ${player.connected ? "online" : "offline"}"></i>
+          <div>
+            <strong>${escapeHtml(player.name)}${player.id === view.selfPlayerId ? " · YOU" : ""}</strong>
+            <small>${player.id === view.hostPlayerId ? "HOST" : player.isBot ? player.botDifficulty === "advanced" ? "ADVANCED COMPUTER" : "BASIC COMPUTER" : player.connected ? "PLAYER" : "RECONNECTING"}</small>
+          </div>
+          ${isHost && player.isBot ? `<button class="seat-remove" data-remove-bot="${player.id}" title="Remove computer">×</button>` : ""}
+        </li>`;
+    }).join("");
     app.innerHTML = `
       <main class="waiting shell">
-        <section class="glass-panel waiting-card">
-          <p class="eyebrow">ROOM READY</p>
-          <h2>${escapeHtml(name)}, your table is open.</h2>
-          <p class="muted">Send this code to your opponent.</p>
-          <button class="room-code" data-action="copy" aria-label="Copy room code">${escapeHtml(roomCode)}</button>
-          <p class="waiting-pulse"><i></i> Waiting for challenger</p>
-          <button class="text-button" data-action="leave">Leave room</button>
+        <section class="glass-panel waiting-card group-lobby">
+          <div class="lobby-heading">
+            <div><p class="eyebrow">ROOM READY</p><h2>${escapeHtml(self.name)}, choose your table.</h2></div>
+            <div><small>ROOM CODE</small><button class="room-code" data-action="copy" aria-label="Copy room code">${escapeHtml(view.roomCode)}</button></div>
+          </div>
+          <p class="muted">Share the code with players on this server. The host may fill any open seat with a computer.</p>
+          <ol class="lobby-seats">${seats}</ol>
+          <div class="lobby-actions">
+            ${isHost ? `
+              <button class="secondary" data-action="add-basic-bot" ${view.players.length >= view.maximumSeats ? "disabled" : ""}>ADD BASIC BOT</button>
+              <button class="secondary advanced-bot-button" data-action="add-advanced-bot" ${view.players.length >= view.maximumSeats ? "disabled" : ""}>ADD ADVANCED BOT</button>
+              <button class="primary" data-action="start" ${view.players.length < 2 ? "disabled" : ""}>START · ${view.players.length} SEATS</button>
+            ` : '<p class="waiting-pulse"><i></i> Host is arranging the table</p>'}
+            <button class="text-button" data-action="leave">Leave room</button>
+          </div>
         </section>
       </main>
     `;
     app.querySelector<HTMLElement>("[data-action='copy']")?.addEventListener("click", async () => {
-      await navigator.clipboard.writeText(roomCode);
+      await navigator.clipboard.writeText(view.roomCode);
       this.showToast("Room code copied.");
+    });
+    app.querySelector<HTMLElement>("[data-action='add-basic-bot']")?.addEventListener("click", () => this.socket.emit("room:add-bot", { difficulty: "basic" }));
+    app.querySelector<HTMLElement>("[data-action='add-advanced-bot']")?.addEventListener("click", () => this.socket.emit("room:add-bot", { difficulty: "advanced" }));
+    app.querySelector<HTMLElement>("[data-action='start']")?.addEventListener("click", () => this.socket.emit("room:start"));
+    app.querySelectorAll<HTMLElement>("[data-remove-bot]").forEach((button) => {
+      button.addEventListener("click", () => this.socket.emit("room:remove-bot", { playerId: button.dataset.removeBot! }));
     });
     app.querySelector<HTMLElement>("[data-action='leave']")?.addEventListener("click", () => this.leave());
   }
 
   private renderMatch(view: MatchSnapshot): void {
     const self = view.players.find((player) => player.id === view.selfPlayerId)!;
-    const opponent = view.players.find((player) => player.id !== view.selfPlayerId)!;
+    const attacker = view.players.find((player) => player.id === view.attackerId)!;
+    const defender = view.defenderId
+      ? view.players.find((player) => player.id === view.defenderId) ?? null
+      : null;
+    const selfIsDuelist = self.id === attacker.id || self.id === defender?.id;
+    const bottom = selfIsDuelist ? self : attacker;
+    const opponent = defender
+      ? (bottom.id === attacker.id ? defender : attacker)
+      : view.players.find((player) => !player.eliminated && player.id !== attacker.id) ?? attacker;
     const sequencePending = this.shouldAnimateBattle(view);
-    const displaySelfHp = sequencePending ? this.hpBeforeBattle(view, self.id) : self.hp;
-    const displayOpponentHp = sequencePending ? this.hpBeforeBattle(view, opponent.id) : opponent.hp;
-    const unassigned = view.phase === "preparation"
+    const displayBottomHp = sequencePending ? this.hpBeforeBattle(view, bottom.id) : bottom.hp;
+    const headerPlayer = view.phase === "targeting" ? attacker : opponent;
+    const displayHeaderHp = sequencePending ? this.hpBeforeBattle(view, headerPlayer.id) : headerPlayer.hp;
+    const unassigned = view.phase === "preparation" && selfIsDuelist
       ? self.hp - self.slots.reduce((total, slot) => total + slot.hearts, 0)
       : 0;
-    const body = view.phase === "discard"
-      ? this.discardPanel(view, self, opponent)
-      : this.battleBoard(view, self, opponent, unassigned, displaySelfHp, sequencePending);
+    const body = view.phase === "targeting"
+      ? this.targetTable(view, self, attacker)
+      : view.phase === "discard"
+        ? selfIsDuelist
+          ? this.discardPanel(view, self, opponent)
+          : this.spectatorPanel(view, attacker, defender)
+        : this.battleBoard(view, self, bottom, opponent, unassigned, displayBottomHp, sequencePending);
 
     app.innerHTML = `
       <main class="match-shell">
         <header class="match-header">
           <div class="identity opponent-id">
-            <span class="connection ${opponent.connected ? "online" : "offline"}"></span>
-            <div><small>OPPONENT</small><strong>${escapeHtml(opponent.name)}${opponent.isBot ? " // CPU" : ""}</strong></div>
-            <span class="total-hp" data-total-player="${opponent.id}">♥ ${displayOpponentHp}</span>
+            <span class="connection ${headerPlayer.connected ? "online" : "offline"}"></span>
+            <div><small>${view.phase === "targeting" ? "ACTIVE ATTACKER" : "TOP DUELIST"}</small><strong>${escapeHtml(headerPlayer.name)}${headerPlayer.isBot ? headerPlayer.botDifficulty === "advanced" ? " // GTO" : " // CPU" : ""}</strong></div>
+            <span class="total-hp" data-total-player="${headerPlayer.id}">♥ ${displayHeaderHp}</span>
           </div>
           <div class="round-clock">
             <small>ROUND ${view.round}</small>
@@ -265,30 +308,118 @@ class RpsClient {
         </header>
         ${body}
       </main>
-      ${view.phase === "finished" && !sequencePending ? this.resultOverlay(view, self, opponent) : ""}
+      ${view.phase === "finished" && !sequencePending ? this.resultOverlay(view, self) : ""}
     `;
 
-    this.bindMatch(view, self, unassigned);
+    this.bindMatch(view, self, unassigned, selfIsDuelist);
     this.updateClock();
     this.startPairReveal(view);
     this.startBattleSequence(view);
     this.startDrawSequence(view);
   }
 
+  private targetTable(view: MatchSnapshot, self: PublicPlayerView, attacker: PublicPlayerView): string {
+    const selfIndex = view.players.findIndex((player) => player.id === view.selfPlayerId);
+    const seatCount = view.players.length;
+    const livingCount = view.players.filter((player) => !player.eliminated).length;
+    const choosing = self.id === attacker.id && !self.eliminated;
+    const seats = view.players.map((player, index) => {
+      const isAttacker = player.id === view.attackerId;
+      const isTarget = choosing && !player.eliminated && !isAttacker;
+      const relativeIndex = (index - selfIndex + seatCount) % seatCount;
+      const angle = Math.PI / 2 - relativeIndex * (Math.PI * 2 / seatCount);
+      const x = 50 + Math.cos(angle) * 44;
+      const y = 50 + Math.sin(angle) * 44;
+      const stateLabel = player.eliminated
+        ? "OUT"
+        : isAttacker
+          ? "CHOOSING"
+          : isTarget
+            ? "CLICK TO CHALLENGE"
+            : player.connected
+              ? "WAITING"
+              : "RECONNECTING";
+      const tag = isTarget ? "button" : "article";
+      return `
+        <${tag} ${isTarget ? `type="button" data-target-player="${player.id}"` : ""} class="poker-seat ${player.eliminated ? "eliminated" : ""} ${isAttacker ? "attacker choosing" : ""} ${isTarget ? "targetable" : ""}" style="--seat-x:${x.toFixed(2)}%;--seat-y:${y.toFixed(2)}%">
+          <span class="seat-number">${player.seatIndex + 1}</span>
+          <div class="poker-seat-copy">
+            <span class="poker-name-line"><strong>${escapeHtml(player.name)}${player.id === view.selfPlayerId ? " · YOU" : ""}</strong>${this.cardCountDisplay(player.handCount, "stack")}</span>
+            <small>${stateLabel}</small>
+          </div>
+          <b>&hearts; ${player.hp}</b>
+        </${tag}>`;
+    }).join("");
+    return `
+      <section class="poker-roster targeting-roster" aria-label="Choose an opponent from the poker table">
+        <div class="poker-felt targeting-felt ${choosing ? "choosing-active" : "waiting-choice"}">
+          <div class="poker-center target-table-copy">
+            <small>SEAT ${attacker.seatIndex + 1} · ${livingCount} PLAYERS LEFT</small>
+            <h2>${choosing ? "Choose opponent" : `${escapeHtml(attacker.name)} is choosing`}</h2>
+            <p>${choosing ? "Click any living opponent at the table." : "Waiting for the highlighted player."}</p>
+            <span class="choosing-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          </div>
+          ${seats}
+        </div>
+        ${self.eliminated ? '<p class="spectator-note">You are eliminated, but you can watch the match to the end.</p>' : ""}
+      </section>`;
+  }
+
+  private cardCountDisplay(count: number, mode: "stack" | "individual"): string {
+    const iconCount = mode === "stack" ? Math.min(count, 1) : count;
+    return `<span class="card-count-display" aria-label="${count} cards left"><span class="card-count-icons" aria-hidden="true">${Array.from(
+      { length: iconCount },
+      () => "<i></i>"
+    ).join("")}</span>${mode === "stack" ? `<b>&times;${count}</b>` : count === 0 ? "<b>0</b>" : ""}</span>`;
+  }
+
+  private duelistBox(
+    view: MatchSnapshot,
+    player: PublicPlayerView,
+    shownHp: number,
+    side: "top" | "bottom"
+  ): string {
+    const role = player.id === view.attackerId ? "ATTACKER" : "DEFENDER";
+    const cardsLeft = Math.max(player.handCount - player.slots.filter((slot) => slot.occupied).length, 0);
+    return `
+      <section class="duelist-box ${side}-duelist" aria-label="${side} duelist ${escapeHtml(player.name)}">
+        <span class="duelist-role">${side.toUpperCase()} · ${role}</span>
+        <strong>${escapeHtml(player.name)}${player.isBot ? player.botDifficulty === "advanced" ? " // GTO" : " // CPU" : ""}</strong>
+        ${this.cardCountDisplay(cardsLeft, "individual")}
+        <b class="duelist-hp">&hearts; ${shownHp}</b>
+      </section>`;
+  }
+
+  private spectatorPanel(
+    view: MatchSnapshot,
+    attacker: PublicPlayerView,
+    defender: PublicPlayerView | null
+  ): string {
+    return `
+      <section class="target-stage spectator-stage">
+        <p class="eyebrow">SHUFFLE PHASE</p>
+        <h2>${escapeHtml(attacker.name)} and ${escapeHtml(defender?.name ?? "their opponent")} are rebuilding their hands.</h2>
+        <p>Your cards stay in your hand. The next living seat clockwise attacks after both duelists lock their discards.</p>
+        <div class="spectator-hand hand-row">${view.self.hand.map((card) => `<span class="hand-card face ${card.symbol}">${cardFace(card.symbol)}</span>`).join("")}</div>
+      </section>`;
+  }
+
   private battleBoard(
     view: MatchSnapshot,
     self: PublicPlayerView,
+    bottom: PublicPlayerView,
     opponent: PublicPlayerView,
     unassigned: number,
-    displaySelfHp: number,
+    displayBottomHp: number,
     sequencePending: boolean
   ): string {
+    const selfIsDuelist = self.id === bottom.id;
     const collectionComplete = Boolean(
       view.battle && this.completedBattleSequences.has(`${view.roomCode}:${view.battle.round}`)
     );
     const lanes = [0, 1, 2].map((index) => {
       const opponentBattle = view.battle?.lanes[index]?.sides.find((side) => side.playerId === opponent.id);
-      const selfBattle = view.battle?.lanes[index]?.sides.find((side) => side.playerId === self.id);
+      const selfBattle = view.battle?.lanes[index]?.sides.find((side) => side.playerId === bottom.id);
       const pairState = view.phase === "preparation"
         ? index < view.activeLane
           ? "pair-revealed"
@@ -305,6 +436,7 @@ class RpsClient {
             : "WAITING";
       return `
         <section class="battle-lane ${pairState} ${sequencePending && view.battle ? "lane-revealing" : ""} ${selfBattle && !sequencePending ? `result-${selfBattle.result} lane-resolved` : ""}" data-slot="${index}" data-result="${selfBattle?.result ?? ""}">
+          ${view.phase === "preparation" ? `<span class="pair-phase-label">${index === view.activeLane ? "CURRENT PAIR" : ""}</span>` : ""}
           <div class="slot opponent-slot">
             ${this.boardCard(
               opponent.slots[index]!,
@@ -321,45 +453,44 @@ class RpsClient {
             ${view.battle?.lanes[index]?.tripleOverride ? '<em>TRIPLE OVERRIDE</em>' : ""}
           </div>
           <div class="slot self-slot" data-drop-slot="${index}">
-            ${this.boardCard(self.slots[index]!, selfBattle?.symbol ?? self.slots[index]!.symbol, true, view.phase, emptyLabel)}
-            <span class="heart-badge own" data-lane-heart="self">♥ ${collectionComplete ? 0 : selfBattle?.hearts ?? self.slots[index]!.hearts}</span>
-            ${view.phase === "preparation" && !self.locked && index === view.activeLane ? `
-              ${view.activeLane < 2 ? `<div class="heart-controls">
-                <button data-heart="-1" data-index="${index}" ${self.slots[index]!.hearts <= 0 ? "disabled" : ""}>−</button>
-                <button data-heart="1" data-index="${index}" ${!self.slots[index]!.occupied || unassigned <= 0 ? "disabled" : ""}>+</button>
-              </div>` : self.slots[index]!.occupied ? '<span class="forced-allocation">ALL REMAINING HP</span>' : ""}
-              ${self.slots[index]!.occupied ? `<button class="remove-card" data-remove="${index}" title="Return card to hand">×</button>` : ""}
-            ` : ""}
+            ${this.boardCard(bottom.slots[index]!, selfBattle?.symbol ?? bottom.slots[index]!.symbol, true, view.phase, emptyLabel)}
+            <span class="heart-badge own" data-lane-heart="self">♥ ${collectionComplete ? 0 : selfBattle?.hearts ?? bottom.slots[index]!.hearts}</span>
           </div>
+          ${view.phase === "preparation" && selfIsDuelist && !self.locked && index === view.activeLane ? `
+            ${view.activeLane < 2 ? `<div class="heart-controls">
+              <button data-heart="1" data-index="${index}" ${!self.slots[index]!.occupied || unassigned <= 0 ? "disabled" : ""}>+1</button>
+              <button data-heart="${unassigned}" data-heart-mode="all" data-index="${index}" ${!self.slots[index]!.occupied || unassigned <= 0 ? "disabled" : ""}>ALL</button>
+            </div>` : self.slots[index]!.occupied ? '<span class="forced-allocation">ALL REMAINING HP</span>' : ""}
+          ` : ""}
         </section>
       `;
     }).join("");
+    const displayOpponentHp = sequencePending ? this.hpBeforeBattle(view, opponent.id) : opponent.hp;
 
     return `
-      <section class="opponent-hand-row" aria-label="Opponent hand">
-        ${Array.from({ length: opponent.handCount }, () => `<span class="mini-back">${cardBack()}</span>`).join("")}
-      </section>
+      ${this.duelistBox(view, opponent, displayOpponentHp, "top")}
       <section class="battle-grid ${sequencePending ? "battle-sequence cards-pre-revealed" : ""}">${lanes}</section>
+      ${this.duelistBox(view, bottom, displayBottomHp, "bottom")}
       <section class="player-console">
         <div class="self-summary">
-          <span><small>YOUR HP</small><strong data-total-player="${self.id}">♥ ${displaySelfHp}</strong></span>
-          <span class="unassigned ${view.phase === "preparation" && view.activeLane === 2 && !self.slots[2].occupied ? "danger" : "safe"}"><small>HP LEFT</small><strong>♥ ${unassigned}</strong></span>
+          <span><small>${selfIsDuelist ? "YOUR HP" : `${escapeHtml(bottom.name)} HP`}</small><strong data-total-player="${bottom.id}">♥ ${displayBottomHp}</strong></span>
+          ${selfIsDuelist ? `<span class="unassigned ${view.phase === "preparation" && view.activeLane === 2 && !self.slots[2].occupied ? "danger" : "safe"}"><small>HP LEFT</small><strong>♥ ${unassigned}</strong></span>` : '<span><small>YOU ARE WATCHING</small><strong class="spectating-label">SPECTATOR</strong></span>'}
         </div>
         <div class="hand-row">${view.self.hand.map((card) => this.handCard(card, self, view)).join("")}</div>
-        ${view.phase === "preparation" ? `
+        ${view.phase === "preparation" && selfIsDuelist ? `
           <div class="phase-actions">
             <p>${self.locked
               ? `Pair ${view.activeLane + 1} locked. Waiting for opponent.`
               : view.activeLane < 2
                 ? self.slots[view.activeLane].occupied
                   ? `${unassigned} HP remains available for later pairs.`
-                  : "An empty pair auto-loses; unused HP remains for later pairs."
+                  : "Locking empty concedes this pair. On timeout, your leftmost card is used."
                 : self.slots[2].occupied
                   ? `The final card automatically carries all ${self.slots[2].hearts} remaining HP.`
-                  : `${unassigned} HP will be lost unless you place the final card.`}</p>
+                  : `On timeout, your leftmost card receives all ${unassigned} remaining HP.`}</p>
             <button class="primary lock-button" data-action="lock" ${self.locked ? "disabled" : ""}>${self.locked ? "LOCKED" : `LOCK PAIR ${view.activeLane + 1}`}</button>
           </div>
-        ` : view.phase === "battle" || sequencePending ? '<p class="reveal-message">Cards revealed. Resolving lanes, then collecting every card\'s hearts…</p>' : ""}
+        ` : view.phase === "preparation" ? `<p class="reveal-message">${escapeHtml(bottom.name)} and ${escapeHtml(opponent.name)} are committing pair ${view.activeLane + 1}.</p>` : view.phase === "battle" || sequencePending || view.phase === "finished" ? '<p class="reveal-message">Cards revealed. Resolving lanes, then collecting every card\'s hearts…</p>' : ""}
       </section>
     `;
   }
@@ -371,11 +502,16 @@ class RpsClient {
     phase: MatchSnapshot["phase"],
     emptyLabel = "DROP CARD"
   ): string {
-    if (!slot.occupied) {
-      return `<div class="board-card empty"><span>${emptyLabel}</span><small>${emptyLabel === "WAITING" ? `PAIR ${phase === "preparation" ? "PENDING" : ""}` : "AUTO-LOSS"}</small></div>`;
-    }
     if (revealedSymbol) {
       return `<div class="board-card face ${own ? "owned" : "revealed"}">${cardFace(revealedSymbol)}</div>`;
+    }
+    if (!slot.occupied) {
+      const helper = emptyLabel === "WAITING"
+        ? `PAIR ${phase === "preparation" ? "PENDING" : ""}`
+        : emptyLabel === "DROP CARD"
+          ? "TIMEOUT: LEFTMOST"
+          : "AUTO-LOSS";
+      return `<div class="board-card empty"><span>${emptyLabel}</span><small>${helper}</small></div>`;
     }
     return `<div class="board-card back">${cardBack()}</div>`;
   }
@@ -384,13 +520,16 @@ class RpsClient {
     const selectedForDiscard = view.self.discardSelection.includes(card.id);
     const selected = this.selectedCardId === card.id;
     const placedIndex = view.self.slotCardIds.indexOf(card.id);
-    const committed = view.phase === "preparation" && placedIndex >= 0 && placedIndex < view.activeLane;
+    const isDuelist = self.id === view.attackerId || self.id === view.defenderId;
+    const committed = view.phase === "preparation" && placedIndex >= 0;
+    const canPrepare = view.phase === "preparation" && isDuelist && !self.locked && !committed;
+    const canDiscard = view.phase === "discard" && isDuelist && !self.locked;
     const drawPending = view.phase === "discard"
       && view.self.drawnCardIds.includes(card.id)
       && !this.animatedDrawCards.has(this.drawCardKey(view, card.id));
     return `
       <button class="hand-card face ${card.symbol} ${selected ? "selected" : ""} ${selectedForDiscard ? "discard-selected" : ""} ${drawPending ? "draw-pending" : ""} ${committed ? "committed" : ""}"
-        data-card-id="${card.id}" draggable="${view.phase === "preparation" && !self.locked && !committed}" ${committed ? "disabled" : ""}>
+        data-card-id="${card.id}" draggable="${canPrepare}" ${canPrepare || canDiscard ? "" : "disabled"}>
         ${cardFace(card.symbol)}
         ${committed ? `<span class="commit-mark">PAIR ${placedIndex + 1}</span>` : ""}
         ${selectedForDiscard ? '<span class="discard-mark">DISCARD</span>' : ""}
@@ -439,17 +578,20 @@ class RpsClient {
     `;
   }
 
-  private resultOverlay(view: MatchSnapshot, self: PublicPlayerView, opponent: PublicPlayerView): string {
+  private resultOverlay(view: MatchSnapshot, self: PublicPlayerView): string {
     const won = view.outcome?.winnerId === self.id;
     const draw = view.outcome?.kind === "draw";
+    const winner = view.players.find((player) => player.id === view.outcome?.winnerId);
     const title = draw ? "DRAW" : won ? "VICTORY" : "DEFEAT";
     const detail = view.outcome?.reason === "showdown"
       ? "Five of a kind decided the table."
       : view.outcome?.reason === "forfeit"
         ? "A disconnect passed the match."
         : draw
-          ? "Both players reached zero HP."
-          : `${escapeHtml(won ? opponent.name : self.name)} ran out of hearts.`;
+          ? "No player remains with any HP."
+          : won
+            ? "You are the last player standing."
+            : `${escapeHtml(winner?.name ?? "Another player")} is the last player standing.`;
     return `
       <div class="result-scrim">
         <section class="result-card ${draw ? "draw" : won ? "win" : "loss"}">
@@ -457,7 +599,7 @@ class RpsClient {
           <h2>${title}</h2>
           <p>${detail}</p>
           <div class="result-actions">
-            <button class="primary" data-action="rematch" ${self.rematchRequested ? "disabled" : ""}>${self.rematchRequested ? "REMATCH REQUESTED" : opponent.isBot ? "PLAY AGAIN" : "REQUEST REMATCH"}</button>
+            <button class="primary" data-action="rematch" ${self.rematchRequested ? "disabled" : ""}>${self.rematchRequested ? "REMATCH REQUESTED" : "REQUEST REMATCH"}</button>
             <button class="ghost" data-action="leave">LEAVE TABLE</button>
           </div>
         </section>
@@ -465,11 +607,19 @@ class RpsClient {
     `;
   }
 
-  private bindMatch(view: MatchSnapshot, self: PublicPlayerView, unassigned: number): void {
+  private bindMatch(
+    view: MatchSnapshot,
+    self: PublicPlayerView,
+    unassigned: number,
+    selfIsDuelist: boolean
+  ): void {
+    app.querySelectorAll<HTMLElement>("[data-target-player]").forEach((button) => {
+      button.addEventListener("click", () => this.socket.emit("match:target", { playerId: button.dataset.targetPlayer! }));
+    });
     app.querySelectorAll<HTMLElement>("[data-card-id]").forEach((element) => {
       element.addEventListener("click", () => {
         const cardId = element.dataset.cardId!;
-        if (view.phase === "discard" && !self.locked) {
+        if (view.phase === "discard" && selfIsDuelist && !self.locked) {
           const alreadySelected = view.self.discardSelection.includes(cardId);
           const next = alreadySelected
             ? view.self.discardSelection.filter((id) => id !== cardId)
@@ -480,7 +630,7 @@ class RpsClient {
           }
           return;
         }
-        if (view.phase === "preparation" && !self.locked) {
+        if (view.phase === "preparation" && selfIsDuelist && !self.locked && !view.self.slotCardIds.includes(cardId)) {
           this.selectedCardId = this.selectedCardId === cardId ? null : cardId;
           this.render();
         }
@@ -500,9 +650,10 @@ class RpsClient {
       });
       element.addEventListener("click", (event) => {
         if ((event.target as HTMLElement).closest("button")) return;
-        if (
-          view.phase === "preparation"
-          && !self.locked
+         if (
+           view.phase === "preparation"
+           && selfIsDuelist
+           && !self.locked
           && Number(element.dataset.dropSlot) === view.activeLane
           && this.selectedCardId
         ) {
@@ -516,16 +667,18 @@ class RpsClient {
     });
 
     app.querySelectorAll<HTMLButtonElement>("[data-heart]").forEach((button) => {
-      button.addEventListener("click", () => this.socket.emit("match:hearts", {
-        slotIndex: Number(button.dataset.index),
-        delta: Number(button.dataset.heart)
-      }));
-    });
-    app.querySelectorAll<HTMLButtonElement>("[data-remove]").forEach((button) => {
-      button.addEventListener("click", () => this.socket.emit("match:place", {
-        slotIndex: Number(button.dataset.remove),
-        cardId: null
-      }));
+      button.addEventListener("click", () => {
+        const delta = Number(button.dataset.heart);
+        const commit = (): void => {
+          button.disabled = true;
+          this.socket.emit("match:hearts", {
+            slotIndex: Number(button.dataset.index),
+            delta
+          });
+        };
+        if (button.dataset.heartMode === "all") this.confirmAllHearts(delta, commit);
+        else commit();
+      });
     });
     app.querySelectorAll<HTMLElement>("[data-action='lock']").forEach((button) => {
       button.addEventListener("click", () => {
@@ -548,6 +701,30 @@ class RpsClient {
     app.querySelector<HTMLElement>("[data-action='buy-draw']")?.addEventListener("click", () => {
       this.socket.emit("match:buy-draw");
     });
+  }
+
+  private confirmAllHearts(amount: number, onConfirm: () => void): void {
+    const dialog = document.createElement("dialog");
+    dialog.className = "confirm-dialog";
+    dialog.setAttribute("aria-labelledby", "confirm-all-title");
+    dialog.innerHTML = `
+      <section>
+        <p class="eyebrow">IRREVERSIBLE COMMITMENT</p>
+        <h2 id="confirm-all-title">Place all ${amount} HP?</h2>
+        <p>This pair will receive every remaining heart. You cannot move them afterward.</p>
+        <div>
+          <button class="ghost" data-confirm-cancel>KEEP CHOOSING</button>
+          <button class="primary" data-confirm-all>COMMIT ALL ${amount} HP</button>
+        </div>
+      </section>`;
+    document.body.append(dialog);
+    dialog.addEventListener("close", () => dialog.remove(), { once: true });
+    dialog.querySelector<HTMLElement>("[data-confirm-cancel]")?.addEventListener("click", () => dialog.close());
+    dialog.querySelector<HTMLElement>("[data-confirm-all]")?.addEventListener("click", () => {
+      onConfirm();
+      dialog.close();
+    });
+    dialog.showModal();
   }
 
   private leave(): void {
@@ -688,12 +865,19 @@ class RpsClient {
 
   private hpBeforeBattle(view: MatchSnapshot, playerId: string): number {
     if (!view.battle) return view.players.find((player) => player.id === playerId)?.hp ?? 0;
-    const playerIndex = view.players.findIndex((player) => player.id === playerId);
-    if (playerIndex < 0) return 0;
+    const playerIndex = view.battle.duelistIds.indexOf(playerId);
+    if (playerIndex < 0) return view.players.find((player) => player.id === playerId)?.hp ?? 0;
     const placed = view.battle.lanes.reduce((total, lane) => {
       return total + (lane.sides.find((side) => side.playerId === playerId)?.hearts ?? 0);
     }, 0);
     return placed + view.battle.unassignedLost[playerIndex]!;
+  }
+
+  private bottomDuelistId(view: MatchSnapshot): string {
+    if (!view.battle) return view.selfPlayerId;
+    return view.battle.duelistIds.includes(view.selfPlayerId)
+      ? view.selfPlayerId
+      : view.battle.duelistIds[0];
   }
 
   private startBattleSequence(view: MatchSnapshot): void {
@@ -773,7 +957,7 @@ class RpsClient {
   private clashLane(view: MatchSnapshot, index: number, key: string): void {
     const laneElement = app.querySelector<HTMLElement>(`.battle-lane[data-slot="${index}"]`);
     const lane = view.battle?.lanes[index];
-    const selfSide = lane?.sides.find((side) => side.playerId === view.selfPlayerId);
+    const selfSide = lane?.sides.find((side) => side.playerId === this.bottomDuelistId(view));
     if (!laneElement || !selfSide) return;
     laneElement.classList.add("lane-clashing");
     laneElement.querySelector<HTMLElement>(".versus-line b")!.textContent = "CLASH";
@@ -788,8 +972,9 @@ class RpsClient {
     const laneElement = app.querySelector<HTMLElement>(`.battle-lane[data-slot="${index}"]`);
     const lane = view.battle?.lanes[index];
     if (!laneElement || !lane) return;
-    const selfSide = lane.sides.find((side) => side.playerId === view.selfPlayerId);
-    const opponentSide = lane.sides.find((side) => side.playerId !== view.selfPlayerId);
+    const bottomId = this.bottomDuelistId(view);
+    const selfSide = lane.sides.find((side) => side.playerId === bottomId);
+    const opponentSide = lane.sides.find((side) => side.playerId !== bottomId);
     if (!selfSide || !opponentSide) return;
 
     laneElement.classList.remove("lane-clashing");
@@ -829,8 +1014,8 @@ class RpsClient {
     app.querySelector<HTMLElement>(".battle-grid")?.classList.add("hearts-collecting");
     const message = app.querySelector<HTMLElement>(".reveal-message");
     if (message) message.textContent = "Collecting each card's hearts into total HP…";
-    for (const player of view.players) {
-      const total = app.querySelector<HTMLElement>(`[data-total-player="${player.id}"]`);
+    for (const playerId of view.battle?.duelistIds ?? []) {
+      const total = app.querySelector<HTMLElement>(`[data-total-player="${playerId}"]`);
       if (!total) continue;
       total.textContent = "♥ 0";
       total.classList.add("hp-collecting");
@@ -848,7 +1033,7 @@ class RpsClient {
     if (animate) this.firedBattleMoments.add(moment);
 
     for (const side of lane.sides) {
-      const isSelf = side.playerId === view.selfPlayerId;
+      const isSelf = side.playerId === this.bottomDuelistId(view);
       const source = laneElement.querySelector<HTMLElement>(
         `[data-lane-heart="${isSelf ? "self" : "opponent"}"]`
       );
@@ -869,7 +1054,7 @@ class RpsClient {
     laneElement.classList.add("lane-collected");
 
     for (const side of lane.sides) {
-      const isSelf = side.playerId === view.selfPlayerId;
+      const isSelf = side.playerId === this.bottomDuelistId(view);
       const source = laneElement.querySelector<HTMLElement>(
         `[data-lane-heart="${isSelf ? "self" : "opponent"}"]`
       );

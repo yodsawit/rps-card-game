@@ -1,4 +1,4 @@
-import type { BattleSlot, Card, PlayerId, PreparationLane, RandomSource } from "./types.js";
+import type { BattleSlot, Card, CardSymbol, PlayerId, PreparationLane, RandomSource } from "./types.js";
 
 export interface PublicOpponentPosition {
   occupied: boolean;
@@ -24,11 +24,78 @@ export interface ComputerPairView {
   activeLane: PreparationLane;
   ownSlots: readonly BattleSlot[];
   opponentPositions: readonly PublicOpponentPosition[];
+  opponentKnownSymbols?: readonly CardSymbol[];
+  opponentRepeatedTripleSymbol?: CardSymbol;
+  turnsSinceObserved?: number;
 }
 
 export interface ComputerPairChoice {
   cardId: string;
   hearts: number;
+}
+
+export interface ComputerTarget {
+  id: PlayerId;
+  hp: number;
+  eliminated: boolean;
+  knownSymbols?: readonly CardSymbol[];
+  turnsSinceObserved?: number;
+}
+
+export function chooseComputerTarget(
+  playerId: PlayerId,
+  hand: readonly Card[],
+  players: readonly ComputerTarget[],
+  random: RandomSource = Math.random
+): PlayerId {
+  const ownCounts = countSymbols(hand.map((card) => card.symbol));
+  const candidates = players
+    .filter((player) => player.id !== playerId && !player.eliminated)
+    .map((player) => {
+      const known = countSymbols(player.knownSymbols ?? []);
+      const confidence = player.knownSymbols ? memoryConfidence(player.turnsSinceObserved) : 0;
+      const favorable =
+        ownCounts.rock * known.scissors
+        + ownCounts.paper * known.rock
+        + ownCounts.scissors * known.paper;
+      const dangerous =
+        ownCounts.rock * known.paper
+        + ownCounts.paper * known.scissors
+        + ownCounts.scissors * known.rock;
+      const matchupScore = (favorable * 4 - dangerous * 2) * confidence;
+      const finishingScore = Math.max(10 - player.hp, 0) * 0.65;
+      return { player, score: matchupScore + finishingScore + random() * 2 };
+    })
+    .sort((left, right) => right.score - left.score);
+  if (!candidates[0]) throw new Error("Computer has no living opponent to attack.");
+  return candidates[0].player.id;
+}
+
+function countSymbols(symbols: readonly CardSymbol[]): Record<CardSymbol, number> {
+  const result: Record<CardSymbol, number> = { rock: 0, paper: 0, scissors: 0 };
+  for (const symbol of symbols) result[symbol] += 1;
+  return result;
+}
+
+function memoryConfidence(turnsSinceObserved: number | undefined): number {
+  const age = Math.max(turnsSinceObserved ?? 1, 1);
+  return Math.max(0.3, 1 - (age - 1) * 0.15);
+}
+
+function matchupCounts(
+  symbol: CardSymbol,
+  opponentSymbols: readonly CardSymbol[]
+): { favorable: number; dangerous: number } {
+  const known = countSymbols(opponentSymbols);
+  if (symbol === "rock") return { favorable: known.scissors, dangerous: known.paper };
+  if (symbol === "paper") return { favorable: known.rock, dangerous: known.scissors };
+  return { favorable: known.paper, dangerous: known.rock };
+}
+
+function counterSymbol(symbol: CardSymbol): CardSymbol {
+  if (symbol === "rock") return "paper";
+  if (symbol === "paper") return "scissors";
+  return "rock";
 }
 
 function combinations<T>(items: readonly T[], size: number): T[][] {
@@ -106,14 +173,26 @@ export function chooseComputerPair(
   const firstSymbol = previousSymbols[0];
   const buildingTriple = firstSymbol !== undefined && previousSymbols.every((symbol) => symbol === firstSymbol);
   const usedSymbols = new Set(previousSymbols);
+  const confidence = view.opponentKnownSymbols
+    ? memoryConfidence(view.turnsSinceObserved)
+    : 0;
+  const repeatedTripleCounter = view.opponentRepeatedTripleSymbol
+    ? counterSymbol(view.opponentRepeatedTripleSymbol)
+    : null;
   const ranked = available
-    .map((card) => ({
-      card,
-      score:
-        (buildingTriple && card.symbol === firstSymbol ? 35 : 0)
-        + (!usedSymbols.has(card.symbol) ? 16 : 0)
-        + random() * 8
-    }))
+    .map((card) => {
+      const matchup = matchupCounts(card.symbol, view.opponentKnownSymbols ?? []);
+      return {
+        card,
+        matchup,
+        score:
+          (buildingTriple && card.symbol === firstSymbol ? 35 : 0)
+          + (!usedSymbols.has(card.symbol) ? 16 : 0)
+          + (card.symbol === repeatedTripleCounter ? 500 : 0)
+          + (matchup.favorable * 12 - matchup.dangerous * 7) * confidence
+          + random() * 8
+      };
+    })
     .sort((left, right) => right.score - left.score);
 
   const committedHp = view.ownSlots
@@ -123,13 +202,18 @@ export function chooseComputerPair(
   if (view.activeLane === 2) {
     return { cardId: ranked[0]!.card.id, hearts: remainingHp };
   }
+  if (ranked[0]!.card.symbol === repeatedTripleCounter) {
+    return { cardId: ranked[0]!.card.id, hearts: remainingHp };
+  }
 
   const pairsRemaining = 3 - view.activeLane;
   const baseline = Math.floor(remainingHp / pairsRemaining);
   const visibleOpponentStake = view.opponentPositions[view.activeLane]?.hearts ?? 0;
   const pressure = visibleOpponentStake > baseline ? 1 : visibleOpponentStake === 0 ? 0 : -1;
+  const matchup = ranked[0]!.matchup;
+  const memoryBias = Math.round((matchup.favorable - matchup.dangerous) * confidence);
   const maximum = Math.max(remainingHp - (pairsRemaining - 1), 0);
-  const hearts = Math.min(Math.max(baseline + pressure, 0), maximum);
+  const hearts = Math.min(Math.max(baseline + pressure + memoryBias, 0), maximum);
   return { cardId: ranked[0]!.card.id, hearts };
 }
 
@@ -137,13 +221,18 @@ export function shouldComputerPurchaseExtraDraw(
   hand: readonly Card[],
   hp: number,
   deckCount: number,
-  random: RandomSource = Math.random
+  random: RandomSource = Math.random,
+  recentLossRatio = 0
 ): boolean {
   if (hp <= 1 || deckCount <= 0) return false;
   const counts = new Map<Card["symbol"], number>();
   for (const card of hand) counts.set(card.symbol, (counts.get(card.symbol) ?? 0) + 1);
-  const bestCollection = Math.max(...counts.values());
+  const bestCollection = Math.max(0, ...counts.values());
   if (bestCollection >= 4 && hp >= 3) return true;
+  if (recentLossRatio >= 0.5 && hp >= 3) {
+    const survivalDrawChance = Math.min(0.98, 0.7 + recentLossRatio * 0.28);
+    return random() < survivalDrawChance;
+  }
   if (bestCollection >= 3 && hp >= 5) return random() < 0.75;
   return hp >= 8 && random() < 0.35;
 }
@@ -162,18 +251,32 @@ function remainingHandScore(cards: readonly Card[]): number {
 export function chooseComputerDiscards(
   hand: readonly Card[],
   requiredDiscards: number,
-  random: RandomSource = Math.random
+  random: RandomSource = Math.random,
+  survivalMode = false
 ): string[] {
   if (requiredDiscards < 0 || requiredDiscards > hand.length) {
     throw new Error("Computer discard count is invalid.");
   }
   if (requiredDiscards === 0) return [];
+  const handCounts = new Map<CardSymbol, number>();
+  for (const card of hand) handCounts.set(card.symbol, (handCounts.get(card.symbol) ?? 0) + 1);
+  const largestCollection = Math.max(0, ...handCounts.values());
+  const dominantSymbols = new Set(
+    [...handCounts.entries()]
+      .filter(([, count]) => count === largestCollection)
+      .map(([symbol]) => symbol)
+  );
   const candidates = combinations(hand, requiredDiscards).map((discarded) => {
     const ids = new Set(discarded.map((card) => card.id));
     const remaining = hand.filter((card) => !ids.has(card.id));
     return {
       discarded,
-      score: remainingHandScore(remaining) + random()
+      score:
+        remainingHandScore(remaining)
+        + (survivalMode
+          ? discarded.filter((card) => dominantSymbols.has(card.symbol)).length * 80
+          : 0)
+        + random()
     };
   });
   candidates.sort((left, right) => right.score - left.score);

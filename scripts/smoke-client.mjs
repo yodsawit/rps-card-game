@@ -1,6 +1,7 @@
 import { io } from "socket.io-client";
 
-const socket = io("http://localhost:3001", { transports: ["websocket"] });
+const serverUrl = process.env.RPS_SERVER_URL ?? "http://localhost:3001";
+const socket = io(serverUrl, { transports: ["websocket"] });
 let latest = null;
 const listeners = new Set();
 
@@ -35,15 +36,25 @@ await new Promise((resolve, reject) => {
 });
 
 const receipt = await new Promise((resolve, reject) => {
-  socket.emit("room:create", { name: "Smoke", versusComputer: true }, (result) => {
+  socket.emit("room:create", { name: "Smoke" }, (result) => {
     if (result.ok) resolve(result.data);
     else reject(new Error(result.error));
   });
 });
 
+await waitFor((snapshot) => snapshot.kind === "lobby" && snapshot.players.length === 1);
+socket.emit("room:add-bot", { difficulty: "advanced" });
+const lobby = await waitFor((snapshot) => snapshot.kind === "lobby" && snapshot.players.length === 2);
+const lobbyBot = lobby.players.find((player) => player.isBot);
+if (!lobbyBot) throw new Error("Computer seat was not added to the lobby.");
+if (lobbyBot.botDifficulty !== "advanced") throw new Error("Advanced computer seat was not preserved.");
+socket.emit("room:start");
 const preparation = await waitFor(
   (snapshot) => snapshot.kind === "match" && snapshot.phase === "preparation"
 );
+if (preparation.defenderId !== lobbyBot.id) {
+  throw new Error("The only living opponent was not selected automatically.");
+}
 const bot = preparation.players.find((player) => player.isBot);
 if (!bot || bot.slots.some((slot) => slot.symbol !== null)) {
   throw new Error("Opponent hidden cards leaked during preparation.");
@@ -124,7 +135,8 @@ if (resolved.phase !== "finished") {
   );
   socket.emit("match:lock");
   await waitFor(
-    (snapshot) => snapshot.kind === "match" && (snapshot.phase === "preparation" || snapshot.phase === "finished")
+    (snapshot) => snapshot.kind === "match"
+      && (["targeting", "preparation", "finished"].includes(snapshot.phase))
   );
 }
 

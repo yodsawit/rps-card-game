@@ -19,11 +19,15 @@ function publicPlayer(
   player: PlayerState,
   viewerId: string
 ): PublicPlayerView {
+  const record = room.players.find((candidate) => candidate.id === player.id);
   return {
     id: player.id,
+    seatIndex: game.players.findIndex((candidate) => candidate.id === player.id),
     name: player.name,
     isBot: player.isBot,
+    botDifficulty: record?.botDifficulty ?? null,
     connected: connected(room, player.id),
+    eliminated: player.eliminated,
     hp: player.hp,
     handCount: player.hand.length,
     locked: player.locked,
@@ -48,6 +52,7 @@ function battleView(battle: BattleSummary | null): BattleView | null {
   if (!battle) return null;
   return {
     round: battle.round,
+    duelistIds: battle.duelistIds,
     lanes: battle.lanes.map((lane) => ({
       index: lane.index,
       tripleOverride: lane.tripleOverride,
@@ -61,7 +66,8 @@ function battleView(battle: BattleSummary | null): BattleView | null {
     })) as BattleView["lanes"],
     unassignedLost: battle.unassignedLost,
     noLoss: battle.noLoss,
-    resultingHp: battle.resultingHp
+    resultingHp: battle.resultingHp,
+    eliminatedIds: [...battle.eliminatedIds]
   };
 }
 
@@ -71,10 +77,14 @@ export function snapshotFor(room: Room, viewer: RoomPlayer, now: number): Server
       kind: "lobby",
       roomCode: room.code,
       selfPlayerId: viewer.id,
-      players: room.players.map((player) => ({
+      hostPlayerId: room.hostPlayerId,
+      maximumSeats: 6,
+      players: room.players.map((player, seatIndex) => ({
         id: player.id,
+        seatIndex,
         name: player.name,
         isBot: player.isBot,
+        botDifficulty: player.botDifficulty,
         connected: player.isBot || player.socketId !== null
       }))
     };
@@ -89,6 +99,8 @@ export function snapshotFor(room: Room, viewer: RoomPlayer, now: number): Server
     selfPlayerId: viewer.id,
     phase: room.game.phase,
     round: room.game.round,
+    attackerId: room.game.attackerId,
+    defenderId: room.game.defenderId,
     activeLane: room.game.preparationLane,
     deadlineAt: room.game.deadlineAt,
     serverNow: now,

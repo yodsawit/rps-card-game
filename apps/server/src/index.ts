@@ -6,6 +6,7 @@ import { Server } from "socket.io";
 import {
   cleanCardId,
   cleanCardIds,
+  cleanBotDifficulty,
   cleanHeartDelta,
   cleanName,
   cleanRoomCode,
@@ -19,6 +20,7 @@ import {
 } from "@rps/protocol";
 import { RoomManager } from "./room-manager.js";
 import { snapshotFor } from "./snapshots.js";
+import { createJsonlStudyLogger } from "./study-log.js";
 
 const app = express();
 const httpServer = createServer(app);
@@ -31,6 +33,15 @@ const io = new Server<
   cors: { origin: true, credentials: true }
 });
 const rooms = new RoomManager();
+const configuredStudyLog = process.env.RPS_STUDY_LOG?.trim();
+const studyLogDisabled = configuredStudyLog !== undefined
+  && ["0", "false", "off"].includes(configuredStudyLog.toLowerCase());
+const studyLogPath = studyLogDisabled
+  ? null
+  : configuredStudyLog
+    ? resolve(configuredStudyLog)
+    : resolve(process.cwd(), "../../game-logs/games.jsonl");
+if (studyLogPath) rooms.setStudyLogHandler(createJsonlStudyLogger(studyLogPath));
 
 app.get("/api/health", (_request, response) => {
   response.json({ ok: true, rooms: rooms.rooms.size, now: Date.now() });
@@ -94,7 +105,7 @@ io.on("connection", (socket) => {
 
   socket.on("room:create", (payload, callback) => {
     acknowledge(callback, () => {
-      const receipt = rooms.createRoom(cleanName(payload.name), socket.id, payload.versusComputer === true, Date.now());
+      const receipt = rooms.createRoom(cleanName(payload.name), socket.id, Date.now());
       bind(receipt);
       const { room, player } = rooms.roomForPlayer(receipt.roomCode, receipt.playerId);
       socket.emit("state:snapshot", snapshotFor(room, player, Date.now()));
@@ -127,7 +138,23 @@ io.on("connection", (socket) => {
   });
 
   socket.on("match:place", (payload) => action((roomCode, playerId) => {
-    rooms.placeCard(roomCode, playerId, cleanSlotIndex(payload.slotIndex), cleanCardId(payload.cardId, true), Date.now());
+    rooms.placeCard(roomCode, playerId, cleanSlotIndex(payload.slotIndex), cleanCardId(payload.cardId) as string, Date.now());
+  }));
+
+  socket.on("room:add-bot", (payload) => action((roomCode, playerId) => {
+    rooms.addBot(roomCode, playerId, Date.now(), cleanBotDifficulty(payload?.difficulty));
+  }));
+
+  socket.on("room:remove-bot", (payload) => action((roomCode, playerId) => {
+    rooms.removeBot(roomCode, playerId, cleanCardId(payload.playerId) as string, Date.now());
+  }));
+
+  socket.on("room:start", () => action((roomCode, playerId) => {
+    rooms.startRoom(roomCode, playerId, Date.now());
+  }));
+
+  socket.on("match:target", (payload) => action((roomCode, playerId) => {
+    rooms.selectTarget(roomCode, playerId, cleanCardId(payload.playerId) as string, Date.now());
   }));
 
   socket.on("match:hearts", (payload) => action((roomCode, playerId) => {
@@ -161,8 +188,9 @@ io.on("connection", (socket) => {
 
 const ticker = setInterval(() => rooms.tick(Date.now()), 100);
 const port = Number(process.env.PORT ?? 3001);
-httpServer.listen(port, () => {
+httpServer.listen(port, "0.0.0.0", () => {
   process.stdout.write(`RPS server listening on http://localhost:${port}\n`);
+  if (studyLogPath) process.stdout.write(`Study log: ${studyLogPath}\n`);
 });
 
 const shutdown = (): void => {

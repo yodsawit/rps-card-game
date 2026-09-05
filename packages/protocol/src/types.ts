@@ -1,6 +1,7 @@
 import type {
   Card,
   CardSymbol,
+  BotDifficulty,
   LaneResult,
   MatchOutcome,
   MatchPhase,
@@ -34,9 +35,12 @@ export interface PublicSlotView {
 
 export interface PublicPlayerView {
   id: PlayerId;
+  seatIndex: number;
   name: string;
   isBot: boolean;
+  botDifficulty: BotDifficulty | null;
   connected: boolean;
+  eliminated: boolean;
   hp: number;
   handCount: number;
   locked: boolean;
@@ -70,20 +74,26 @@ export interface BattleLaneView {
 
 export interface BattleView {
   round: number;
+  duelistIds: [PlayerId, PlayerId];
   lanes: [BattleLaneView, BattleLaneView, BattleLaneView];
   unassignedLost: [number, number];
   noLoss: [boolean, boolean];
   resultingHp: [number, number];
+  eliminatedIds: PlayerId[];
 }
 
 export interface LobbySnapshot {
   kind: "lobby";
   roomCode: string;
   selfPlayerId: PlayerId;
+  hostPlayerId: PlayerId;
+  maximumSeats: number;
   players: Array<{
     id: PlayerId;
+    seatIndex: number;
     name: string;
     isBot: boolean;
+    botDifficulty: BotDifficulty | null;
     connected: boolean;
   }>;
 }
@@ -94,11 +104,13 @@ export interface MatchSnapshot {
   selfPlayerId: PlayerId;
   phase: MatchPhase;
   round: number;
+  attackerId: PlayerId;
+  defenderId: PlayerId | null;
   activeLane: PreparationLane;
   deadlineAt: number | null;
   serverNow: number;
   deckCount: number;
-  players: [PublicPlayerView, PublicPlayerView];
+  players: PublicPlayerView[];
   self: PrivatePlayerView;
   battle: BattleView | null;
   outcome: MatchOutcome | null;
@@ -108,7 +120,18 @@ export type ServerSnapshot = LobbySnapshot | MatchSnapshot;
 
 export interface CreateRoomPayload {
   name: string;
-  versusComputer: boolean;
+}
+
+export interface RemoveBotPayload {
+  playerId: PlayerId;
+}
+
+export interface AddBotPayload {
+  difficulty: BotDifficulty;
+}
+
+export interface SelectTargetPayload {
+  playerId: PlayerId;
 }
 
 export interface JoinRoomPayload {
@@ -120,7 +143,7 @@ export interface ResumeRoomPayload extends SessionReceipt {}
 
 export interface PlaceCardPayload {
   slotIndex: number;
-  cardId: string | null;
+  cardId: string;
 }
 
 export interface AdjustHeartsPayload {
@@ -146,7 +169,11 @@ export interface ClientToServerEvents {
     acknowledge: (result: Ack<SessionReceipt>) => void
   ) => void;
   "room:leave": () => void;
+  "room:add-bot": (payload: AddBotPayload) => void;
+  "room:remove-bot": (payload: RemoveBotPayload) => void;
+  "room:start": () => void;
   "room:rematch": () => void;
+  "match:target": (payload: SelectTargetPayload) => void;
   "match:place": (payload: PlaceCardPayload) => void;
   "match:hearts": (payload: AdjustHeartsPayload) => void;
   "match:discard": (payload: DiscardSelectionPayload) => void;
