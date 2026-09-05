@@ -1,7 +1,7 @@
 import type { BotDifficulty } from "@rps/game-core";
 
 export function cleanBotDifficulty(value: unknown): BotDifficulty {
-  if (value === "basic" || value === "advanced") return value;
+  if (value === "basic" || value === "advanced" || value === "learned") return value;
   throw new Error("Computer difficulty is invalid.");
 }
 

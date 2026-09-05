@@ -5,7 +5,8 @@ face-down pair choices and reveals, optional HP-paid draws, hand growth,
 triples, and five-of-a-kind showdowns. Players attack clockwise and may choose
 any living opponent; computer seats can be added from the room lobby.
 
-Hosts can add either a basic heuristic bot or an advanced bot. Advanced bots
+Hosts can add a basic heuristic bot, the exact advanced GTO bot, or the learned
+PPO bot. Advanced bots
 share the last two public played-hand and draw-count observations, sample joint
 hidden-hand/deck states from that history, enumerate every legal remaining
 symbol sequence (up to Rock/Paper/Scissors cubed) and whole-HP split, and solve
@@ -48,6 +49,12 @@ file records targets, public pair reveals, battle results, public draw/discard
 counts, and final standings. It excludes session tokens, socket IDs, deck order,
 and hidden card IDs.
 
+The learned bot is deployed separately as `RL`. It samples the mixed policy
+selected by the fixed-seed promotion evaluation, so it does not replace either
+ARC or GTO. The server uses a synchronous JSON representation of the same
+weights used by the verified ONNX export; a parity test guards against weight
+conversion drift.
+
 Set `RPS_STUDY_LOG` to another file path to relocate the log, or set it to
 `off` to disable logging.
 
@@ -60,6 +67,10 @@ deck, battle, draw, discard, triple, and showdown rules without exposing hidden
 cards. Training produces PyTorch checkpoints, metrics, an ONNX policy, and a
 machine-readable model specification. See [the training guide](training/README.md)
 before promoting a learned checkpoint into the server.
+
+The promoted model, external ONNX data, model specification, and evaluation
+reports live together in `apps/server/models`. Both `rps_policy.onnx` and
+`rps_policy.onnx.data` are required when loading the ONNX model.
 
 ## Public deployment
 
@@ -74,6 +85,10 @@ logging is disabled because a free service has ephemeral storage.
 Free services can sleep after an idle period, and every in-memory room is lost
 when the process sleeps, restarts, or redeploys. This configuration is suitable
 for public hobby play, not durable production rooms.
+
+When Render auto-deploy is enabled for the repository, a push to `main`
+automatically builds the commit and restarts the service. Existing in-memory
+rooms are lost during that restart.
 
 ## Structure
 

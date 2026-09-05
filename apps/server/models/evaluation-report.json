@@ -1,0 +1,147 @@
+{
+  "authoritative_typescript_bots": {
+    "ARC": {
+      "averageRounds": 4.06,
+      "draws": 3,
+      "episodes": 100,
+      "losses": 33,
+      "nonLossRate": 0.67,
+      "seat0": {
+        "draws": 2,
+        "losses": 17,
+        "wins": 31
+      },
+      "seat1": {
+        "draws": 1,
+        "losses": 16,
+        "wins": 33
+      },
+      "winRate": 0.64,
+      "wins": 64
+    },
+    "GTO": {
+      "averageRounds": 4.6,
+      "draws": 0,
+      "episodes": 100,
+      "losses": 52,
+      "nonLossRate": 0.48,
+      "seat0": {
+        "draws": 0,
+        "losses": 24,
+        "wins": 26
+      },
+      "seat1": {
+        "draws": 0,
+        "losses": 28,
+        "wins": 22
+      },
+      "winRate": 0.48,
+      "wins": 48
+    },
+    "episodesPerOpponent": 100,
+    "policy": "deployed rps_policy.weights.json",
+    "rules": "authoritative TypeScript RoomManager",
+    "schemaVersion": 1,
+    "seed": 111000000
+  },
+  "best_checkpoint_vs_final_checkpoint": {
+    "average_rounds": 3.848,
+    "draws": 8,
+    "episodes": 2000,
+    "losses": 1043,
+    "non_loss_rate": 0.4785,
+    "perspective": "best.pt",
+    "seat_0": {
+      "draws": 5,
+      "losses": 519,
+      "wins": 476
+    },
+    "seat_1": {
+      "draws": 3,
+      "losses": 524,
+      "wins": 473
+    },
+    "win_rate": 0.4745,
+    "wins": 949
+  },
+  "matched_python_heuristic": {
+    "best.pt": {
+      "average_rounds": 4.0505,
+      "draws": 18,
+      "episodes": 2000,
+      "losses": 425,
+      "non_loss_rate": 0.7875,
+      "seat_0": {
+        "draws": 11,
+        "losses": 213,
+        "wins": 776
+      },
+      "seat_1": {
+        "draws": 7,
+        "losses": 212,
+        "wins": 781
+      },
+      "win_rate": 0.7785,
+      "wins": 1557
+    },
+    "final.pt": {
+      "average_rounds": 4.102,
+      "draws": 18,
+      "episodes": 2000,
+      "losses": 416,
+      "non_loss_rate": 0.792,
+      "seat_0": {
+        "draws": 10,
+        "losses": 211,
+        "wins": 779
+      },
+      "seat_1": {
+        "draws": 8,
+        "losses": 205,
+        "wins": 787
+      },
+      "win_rate": 0.783,
+      "wins": 1566
+    }
+  },
+  "onnx_validation": {
+    "external_data_present": true,
+    "inputs": {
+      "legal_mask": [
+        1,
+        63
+      ],
+      "observation": [
+        1,
+        90
+      ]
+    },
+    "maximum_logits_error": 5.960464477539062e-07,
+    "maximum_value_error": 1.1920928955078125e-07,
+    "outputs": {
+      "policy_logits": [
+        1,
+        63
+      ],
+      "value": [
+        1
+      ]
+    },
+    "providers": [
+      "CPUExecutionProvider"
+    ]
+  },
+  "schema_version": 1,
+  "seeds": {
+    "base": 71000000,
+    "checkpoint_environment": 71000000,
+    "checkpoint_policy": 81000000,
+    "typescript": 111000000
+  },
+  "selection": {
+    "checkpoint": "final.pt",
+    "checkpoint_sha256": "9eee258ad702f6e72f70651c91aa82499e808d30546b9fd92314d5a5c522c182",
+    "criterion": "highest matched-seed win rate versus Python heuristic",
+    "update": 200
+  }
+}

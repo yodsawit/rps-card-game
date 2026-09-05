@@ -1,7 +1,7 @@
 export const CARD_SYMBOLS = ["rock", "paper", "scissors"] as const;
 
 export type CardSymbol = (typeof CARD_SYMBOLS)[number];
-export type BotDifficulty = "basic" | "advanced";
+export type BotDifficulty = "basic" | "advanced" | "learned";
 export type PlayerId = string;
 export type PreparationLane = 0 | 1 | 2;
 export type LaneResult = "win" | "loss" | "draw";

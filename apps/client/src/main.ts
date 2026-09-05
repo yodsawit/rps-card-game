@@ -224,7 +224,7 @@ class RpsClient {
           <i class="connection ${player.connected ? "online" : "offline"}"></i>
           <div>
             <strong>${escapeHtml(player.name)}${player.id === view.selfPlayerId ? " · YOU" : ""}</strong>
-            <small>${player.id === view.hostPlayerId ? "HOST" : player.isBot ? player.botDifficulty === "advanced" ? "ADVANCED COMPUTER" : "BASIC COMPUTER" : player.connected ? "PLAYER" : "RECONNECTING"}</small>
+            <small>${player.id === view.hostPlayerId ? "HOST" : player.isBot ? player.botDifficulty === "advanced" ? "GTO COMPUTER" : player.botDifficulty === "learned" ? "LEARNED COMPUTER" : "BASIC COMPUTER" : player.connected ? "PLAYER" : "RECONNECTING"}</small>
           </div>
           ${isHost && player.isBot ? `<button class="seat-remove" data-remove-bot="${player.id}" title="Remove computer">×</button>` : ""}
         </li>`;
@@ -242,6 +242,7 @@ class RpsClient {
             ${isHost ? `
               <button class="secondary" data-action="add-basic-bot" ${view.players.length >= view.maximumSeats ? "disabled" : ""}>ADD BASIC BOT</button>
               <button class="secondary advanced-bot-button" data-action="add-advanced-bot" ${view.players.length >= view.maximumSeats ? "disabled" : ""}>ADD ADVANCED BOT</button>
+              <button class="secondary learned-bot-button" data-action="add-learned-bot" ${view.players.length >= view.maximumSeats ? "disabled" : ""}>ADD LEARNED BOT</button>
               <button class="primary" data-action="start" ${view.players.length < 2 ? "disabled" : ""}>START · ${view.players.length} SEATS</button>
             ` : '<p class="waiting-pulse"><i></i> Host is arranging the table</p>'}
             <button class="text-button" data-action="leave">Leave room</button>
@@ -255,6 +256,7 @@ class RpsClient {
     });
     app.querySelector<HTMLElement>("[data-action='add-basic-bot']")?.addEventListener("click", () => this.socket.emit("room:add-bot", { difficulty: "basic" }));
     app.querySelector<HTMLElement>("[data-action='add-advanced-bot']")?.addEventListener("click", () => this.socket.emit("room:add-bot", { difficulty: "advanced" }));
+    app.querySelector<HTMLElement>("[data-action='add-learned-bot']")?.addEventListener("click", () => this.socket.emit("room:add-bot", { difficulty: "learned" }));
     app.querySelector<HTMLElement>("[data-action='start']")?.addEventListener("click", () => this.socket.emit("room:start"));
     app.querySelectorAll<HTMLElement>("[data-remove-bot]").forEach((button) => {
       button.addEventListener("click", () => this.socket.emit("room:remove-bot", { playerId: button.dataset.removeBot! }));
@@ -293,7 +295,7 @@ class RpsClient {
         <header class="match-header">
           <div class="identity opponent-id">
             <span class="connection ${headerPlayer.connected ? "online" : "offline"}"></span>
-            <div><small>${view.phase === "targeting" ? "ACTIVE ATTACKER" : "TOP DUELIST"}</small><strong>${escapeHtml(headerPlayer.name)}${headerPlayer.isBot ? headerPlayer.botDifficulty === "advanced" ? " // GTO" : " // CPU" : ""}</strong></div>
+            <div><small>${view.phase === "targeting" ? "ACTIVE ATTACKER" : "TOP DUELIST"}</small><strong>${escapeHtml(headerPlayer.name)}${headerPlayer.isBot ? headerPlayer.botDifficulty === "advanced" ? " // GTO" : headerPlayer.botDifficulty === "learned" ? " // RL" : " // CPU" : ""}</strong></div>
             <span class="total-hp" data-total-player="${headerPlayer.id}">♥ ${displayHeaderHp}</span>
           </div>
           <div class="round-clock">
@@ -384,7 +386,7 @@ class RpsClient {
     return `
       <section class="duelist-box ${side}-duelist" aria-label="${side} duelist ${escapeHtml(player.name)}">
         <span class="duelist-role">${side.toUpperCase()} · ${role}</span>
-        <strong>${escapeHtml(player.name)}${player.isBot ? player.botDifficulty === "advanced" ? " // GTO" : " // CPU" : ""}</strong>
+        <strong>${escapeHtml(player.name)}${player.isBot ? player.botDifficulty === "advanced" ? " // GTO" : player.botDifficulty === "learned" ? " // RL" : " // CPU" : ""}</strong>
         ${this.cardCountDisplay(cardsLeft, "individual")}
         <b class="duelist-hp">&hearts; ${shownHp}</b>
       </section>`;

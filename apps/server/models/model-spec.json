@@ -1,0 +1,125 @@
+{
+  "action_encoding": {
+    "battle": "symbol_index * heart_levels + committed_hearts",
+    "buy": {
+      "0": "skip",
+      "1": "spend one HP and draw"
+    },
+    "discard": {
+      "0": "rock",
+      "1": "paper",
+      "2": "scissors"
+    }
+  },
+  "action_size": 63,
+  "deployed_checkpoint": {
+    "checkpoint": "final.pt",
+    "checkpoint_sha256": "9eee258ad702f6e72f70651c91aa82499e808d30546b9fd92314d5a5c522c182",
+    "criterion": "highest matched-seed win rate versus Python heuristic",
+    "update": 200
+  },
+  "deployment_evaluation": {
+    "authoritative_typescript_bots": {
+      "ARC": {
+        "averageRounds": 4.06,
+        "draws": 3,
+        "episodes": 100,
+        "losses": 33,
+        "nonLossRate": 0.67,
+        "seat0": {
+          "draws": 2,
+          "losses": 17,
+          "wins": 31
+        },
+        "seat1": {
+          "draws": 1,
+          "losses": 16,
+          "wins": 33
+        },
+        "winRate": 0.64,
+        "wins": 64
+      },
+      "GTO": {
+        "averageRounds": 4.6,
+        "draws": 0,
+        "episodes": 100,
+        "losses": 52,
+        "nonLossRate": 0.48,
+        "seat0": {
+          "draws": 0,
+          "losses": 24,
+          "wins": 26
+        },
+        "seat1": {
+          "draws": 0,
+          "losses": 28,
+          "wins": 22
+        },
+        "winRate": 0.48,
+        "wins": 48
+      }
+    },
+    "matched_python_heuristic": {
+      "average_rounds": 4.102,
+      "draws": 18,
+      "episodes": 2000,
+      "losses": 416,
+      "non_loss_rate": 0.792,
+      "seat_0": {
+        "draws": 10,
+        "losses": 211,
+        "wins": 779
+      },
+      "seat_1": {
+        "draws": 8,
+        "losses": 205,
+        "wins": 787
+      },
+      "win_rate": 0.783,
+      "wins": 1566
+    }
+  },
+  "final_evaluation_vs_python_heuristic": {
+    "average_rounds": 4.155,
+    "draws": 0,
+    "episodes": 200,
+    "losses": 30,
+    "non_loss_rate": 0.85,
+    "win_rate": 0.85,
+    "wins": 170
+  },
+  "heart_levels": 21,
+  "hp_reward_weight": 0.0,
+  "observation_size": 90,
+  "reward": "terminal win=1, draw=0, loss=-1 plus optional zero-sum HP tie-break",
+  "schema_version": 1,
+  "symbols": [
+    "rock",
+    "paper",
+    "scissors"
+  ],
+  "training_arguments": {
+    "clip_ratio": 0.2,
+    "device": "auto",
+    "entropy_coefficient": 0.015,
+    "episodes_per_update": 64,
+    "epochs": 4,
+    "eval_episodes": 100,
+    "evaluate_every": 10,
+    "heuristic_probability": 0.2,
+    "hidden_size": 192,
+    "hp_reward_weight": 0.0,
+    "league_probability": 0.25,
+    "learning_rate": 0.0003,
+    "maximum_gradient_norm": 0.5,
+    "maximum_snapshots": 8,
+    "minibatch_size": 512,
+    "output_dir": "/content/drive/MyDrive/rps-self-play",
+    "resume": null,
+    "save_every": 10,
+    "seed": 20260906,
+    "snapshot_every": 10,
+    "updates": 200,
+    "value_coefficient": 0.5
+  }
+}

@@ -34,6 +34,11 @@ import {
   type RandomSource
 } from "@rps/game-core";
 import type { SessionReceipt } from "@rps/protocol";
+import {
+  chooseLearnedDiscards,
+  chooseLearnedPair,
+  shouldLearnedPurchaseExtraDraw
+} from "./learned-ai.js";
 import type { GameStudyEventHandler, GameStudyEventType } from "./study-log.js";
 import type { Room, RoomPlayer } from "./types.js";
 
@@ -92,7 +97,7 @@ export class RoomManager {
     const room = this.lobbyRoom(roomCode);
     this.requireHost(room, playerId);
     if (room.players.length >= MAX_SEATS) throw new Error("All six seats are occupied.");
-    const prefix = difficulty === "advanced" ? "GTO" : "ARC";
+    const prefix = difficulty === "advanced" ? "GTO" : difficulty === "learned" ? "RL" : "ARC";
     const usedNames = new Set(room.players.filter((player) => player.isBot).map((player) => player.name));
     let botNumber = 1;
     while (usedNames.has(`${prefix}-${botNumber}`)) botNumber += 1;
@@ -307,7 +312,7 @@ export class RoomManager {
     attackerId: string,
     targetId: string,
     now: number,
-    source: "human" | "timeout" | "automatic" | "basic_bot" | "advanced_bot"
+    source: "human" | "timeout" | "automatic" | "basic_bot" | "advanced_bot" | "learned_bot"
   ): void {
     selectOpponent(room.game!, attackerId, targetId, now);
     this.study(room, now, "target_selected", { attackerId, targetId, source });
@@ -326,8 +331,10 @@ export class RoomManager {
           continue;
         }
         if (!attacker.isBot) return;
-        const advanced = room.players.find((player) => player.id === attacker.id)?.botDifficulty === "advanced";
-        const targetId = advanced
+        const difficulty = room.players.find((player) => player.id === attacker.id)?.botDifficulty;
+        const advanced = difficulty === "advanced";
+        const learned = difficulty === "learned";
+        const targetId = advanced || learned
           ? chooseAdvancedTarget({
               playerId: attacker.id,
               hand: attacker.hand,
@@ -364,7 +371,13 @@ export class RoomManager {
               }),
               this.random
             );
-        this.selectRoomOpponent(room, attacker.id, targetId, now, advanced ? "advanced_bot" : "basic_bot");
+        this.selectRoomOpponent(
+          room,
+          attacker.id,
+          targetId,
+          now,
+          advanced ? "advanced_bot" : learned ? "learned_bot" : "basic_bot"
+        );
         continue;
       }
 
@@ -376,9 +389,13 @@ export class RoomManager {
         for (const bot of duelists.filter((player) => player.isBot && !player.locked)) {
           const opponent = duelists.find((player) => player.id !== bot.id)!;
           const observation = room.knownHands.get(opponent.id);
-          const advanced = room.players.find((player) => player.id === bot.id)?.botDifficulty === "advanced";
+          const difficulty = room.players.find((player) => player.id === bot.id)?.botDifficulty;
+          const advanced = difficulty === "advanced";
+          const learned = difficulty === "learned";
           const opponentPositions = publicPositions(opponent.slots);
-          const choice = advanced
+          const choice = learned
+            ? chooseLearnedPair(room, bot.id, this.random)
+            : advanced
             ? chooseAdvancedPair({
                 playerId: bot.id,
                 hand: bot.hand,
@@ -484,22 +501,29 @@ export class RoomManager {
         );
         let acted = false;
         for (const bot of duelists.filter((player) => player.isBot && !player.locked)) {
-          const advanced = room.players.find((player) => player.id === bot.id)?.botDifficulty === "advanced";
+          const difficulty = room.players.find((player) => player.id === bot.id)?.botDifficulty;
+          const advanced = difficulty === "advanced";
+          const learned = difficulty === "learned";
           const recentLoss = room.recentBattleLosses.get(bot.id);
           const survivalMode = recentLoss?.battleRound === game.round && recentLoss.lossRatio >= 0.5;
-          if (!advanced && shouldComputerPurchaseExtraDraw(
-            bot.hand,
-            bot.hp,
-            game.deck.length,
-            this.random,
-            survivalMode ? recentLoss.lossRatio : 0
-          )) {
+          const purchase = learned
+            ? shouldLearnedPurchaseExtraDraw(room, bot.id, this.random)
+            : !advanced && shouldComputerPurchaseExtraDraw(
+                bot.hand,
+                bot.hp,
+                game.deck.length,
+                this.random,
+                survivalMode ? recentLoss.lossRatio : 0
+              );
+          if (purchase) {
             purchaseExtraDraw(game, bot.id);
           }
           setDiscardSelection(
             game,
             bot.id,
-            advanced
+            learned
+              ? chooseLearnedDiscards(room, bot.id, bot.requiredDiscards, this.random)
+              : advanced
               ? chooseAdvancedDiscards(bot.hand, bot.requiredDiscards, this.random)
               : chooseComputerDiscards(bot.hand, bot.requiredDiscards, this.random, survivalMode)
           );

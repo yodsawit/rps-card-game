@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "policy": "deployed rps_policy.weights.json",
+  "rules": "authoritative TypeScript RoomManager",
+  "episodesPerOpponent": 100,
+  "seed": 111000000,
+  "ARC": {
+    "episodes": 100,
+    "wins": 64,
+    "losses": 33,
+    "draws": 3,
+    "winRate": 0.64,
+    "nonLossRate": 0.67,
+    "averageRounds": 4.06,
+    "seat0": {
+      "wins": 31,
+      "losses": 17,
+      "draws": 2
+    },
+    "seat1": {
+      "wins": 33,
+      "losses": 16,
+      "draws": 1
+    }
+  },
+  "GTO": {
+    "episodes": 100,
+    "wins": 48,
+    "losses": 52,
+    "draws": 0,
+    "winRate": 0.48,
+    "nonLossRate": 0.48,
+    "averageRounds": 4.6,
+    "seat0": {
+      "wins": 26,
+      "losses": 24,
+      "draws": 0
+    },
+    "seat1": {
+      "wins": 22,
+      "losses": 28,
+      "draws": 0
+    }
+  }
+}

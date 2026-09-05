@@ -156,9 +156,10 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .lobby-seat.empty-seat { grid-template-columns: 31px 1fr; opacity: .45; border-style: dashed; }
 .lobby-seat.empty-seat > div { grid-column: 2; }
 .seat-remove { width: 29px; height: 29px; border-radius: 50%; background: rgba(255,98,123,.12); color: var(--rose); font-size: 18px; }
-.lobby-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding-top: 20px; border-top: 1px solid var(--line); }
+.lobby-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; padding-top: 20px; border-top: 1px solid var(--line); }
 .lobby-actions .text-button { margin-left: auto; }
 .advanced-bot-button { border-color: rgba(105,234,216,.42); color: var(--mint); }
+.learned-bot-button { border-color: rgba(184,137,255,.48); color: #c9a8ff; }
 
 .match-shell { width: min(1400px, calc(100% - 28px)); margin: 0 auto; padding: 14px 0 26px; }
 .match-header {

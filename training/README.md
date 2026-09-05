@@ -67,11 +67,31 @@ The output directory contains:
 - `rps_policy.onnx` inference model;
 - `model-spec.json` observation and action metadata.
 
-The ONNX file is not automatically trusted by the game server. It should first
-pass fixed-seed evaluation against ARC, the current Advanced bot, and frozen
-learned policies with both seat orders. Server-side feature encoding and ONNX
-inference are a separate integration step so the existing bot remains available
-as a safe fallback.
+The ONNX file is not automatically trusted by the game server. Promotion first
+runs fixed-seed evaluation against ARC, the current Advanced bot, and the other
+learned checkpoint with both seat orders. The public server exposes the promoted
+policy as a separate learned bot, leaving ARC and GTO available as controls.
+
+## Evaluate and promote an artifact archive
+
+Install the local CPU evaluation dependencies, then run the promotion command:
+
+```powershell
+python -m pip install --user torch numpy onnx onnxruntime onnxscript
+$env:PYTHONUTF8='1'
+python -m training.evaluate_artifacts "C:\path\to\rps-self-play-artifacts.zip" --episodes 2000 --typescript-episodes 100
+```
+
+The evaluator gives `best.pt` and `final.pt` identical environment and policy
+seeds, alternates their seats, runs a direct checkpoint matchup, and selects the
+higher fixed-seed heuristic win rate. It exports that checkpoint, verifies
+PyTorch/ONNX numerical parity, then runs the deployed synchronous policy against
+the real TypeScript ARC and GTO implementations through the authoritative room
+manager. Generated deployment files are written to `apps/server/models`.
+
+Colab checkpoints written by Python 3.13 use the newer `pathlib._local` pickle
+name. The evaluator includes a compatibility unpickler so they can be promoted
+on Python 3.12 on Windows without changing the original ZIP.
 
 ## Local checks
 
