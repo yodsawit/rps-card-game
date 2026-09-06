@@ -132,12 +132,13 @@ def record_result(
     return 0, 1, 0
 
 
-def evaluate_python_heuristic(
+def evaluate_python_scripted(
     model: MaskedActorCritic,
     device: torch.device,
     episodes: int,
     environment_seed: int,
     policy_seed: int,
+    opponent: str,
 ) -> MatchRecord:
     wins = losses = draws = rounds = 0
     seats = empty_seats()
@@ -148,9 +149,10 @@ def evaluate_python_heuristic(
             model,
             device,
             environment_seed + index,
-            mode="heuristic",
+            mode=opponent,
             learner_seat=learner_seat,
             collect=False,
+            table_seats=2 + index % 5,
         )
         result_counts = record_result(seats, learner_seat, result.winner)
         wins += result_counts[0]
@@ -265,7 +267,7 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("artifacts", type=Path)
     parser.add_argument("--episodes", type=int, default=2_000)
-    parser.add_argument("--typescript-episodes", type=int, default=200)
+    parser.add_argument("--typescript-episodes", type=int, default=1_000)
     parser.add_argument("--seed", type=int, default=71_000_000)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "apps" / "server" / "models")
     return parser.parse_args()
@@ -275,8 +277,8 @@ def main() -> None:
     args = parse_arguments()
     if args.episodes < 2_000:
         raise ValueError("Matched checkpoint evaluation requires at least 2,000 episodes.")
-    if args.typescript_episodes < 2:
-        raise ValueError("TypeScript evaluation requires at least two episodes for both seat orders.")
+    if args.typescript_episodes < 1_000:
+        raise ValueError("The authoritative promotion gate requires at least 1,000 episodes per opponent.")
     torch.set_num_threads(max(1, min(torch.get_num_threads(), 4)))
     device = torch.device("cpu")
     source = ArtifactSource(args.artifacts)
@@ -291,10 +293,28 @@ def main() -> None:
 
     matched: dict[str, dict[str, Any]] = {}
     for name, (model, checkpoint) in models_and_checkpoints.items():
-        print(f"Evaluating {name} (update {checkpoint['update']}) for {args.episodes} matched games...", flush=True)
-        matched[name] = evaluate_python_heuristic(
-            model, device, args.episodes, args.seed, args.seed + 10_000_000
+        print(
+            f"Evaluating {name} (update {checkpoint['update']}) for {args.episodes} "
+            "matched games against each Python scripted bot...",
+            flush=True,
+        )
+        arc = evaluate_python_scripted(
+            model, device, args.episodes, args.seed, args.seed + 10_000_000, "arc"
         ).to_dict()
+        gto = evaluate_python_scripted(
+            model,
+            device,
+            args.episodes,
+            args.seed + 5_000_000,
+            args.seed + 15_000_000,
+            "gto",
+        ).to_dict()
+        matched[name] = {
+            "ARC": arc,
+            "GTO": gto,
+            "aggregate_win_rate": (arc["win_rate"] + gto["win_rate"]) / 2,
+            "aggregate_non_loss_rate": (arc["non_loss_rate"] + gto["non_loss_rate"]) / 2,
+        }
 
     print(f"Running {args.episodes} best-vs-final games...", flush=True)
     head_to_head = evaluate_head_to_head(
@@ -309,8 +329,8 @@ def main() -> None:
     selected_name = max(
         matched,
         key=lambda name: (
-            matched[name]["win_rate"],
-            matched[name]["non_loss_rate"],
+            matched[name]["aggregate_win_rate"],
+            matched[name]["aggregate_non_loss_rate"],
             int(models_and_checkpoints[name][1]["update"]),
         ),
     )
@@ -318,36 +338,116 @@ def main() -> None:
     print(f"Selected {selected_name} at update {selected_checkpoint['update']}.", flush=True)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    baseline_typescript = None
+    weights_path = args.output_dir / "rps_policy.weights.json"
+    if weights_path.is_file():
+        print(
+            f"Evaluating the currently deployed baseline for {args.typescript_episodes} "
+            "authoritative games against each bot...",
+            flush=True,
+        )
+        baseline_typescript = evaluate_authoritative_typescript_bots(
+            args.typescript_episodes,
+            args.seed + 40_000_000,
+            args.output_dir / "baseline-server-bot-evaluation.json",
+        )
+    deployment_paths = [
+        args.output_dir / name
+        for name in (
+            "rps_policy.onnx",
+            "rps_policy.onnx.data",
+            "rps_policy.weights.json",
+            "model-spec.json",
+            "evaluation-report.json",
+            "server-bot-evaluation.json",
+        )
+    ]
+    previous_deployment = {
+        path: path.read_bytes() if path.is_file() else None for path in deployment_paths
+    }
+
+    def restore_previous_deployment() -> None:
+        for path, contents in previous_deployment.items():
+            if contents is None:
+                if path.exists():
+                    path.unlink()
+            else:
+                path.write_bytes(contents)
+
     onnx_path = args.output_dir / "rps_policy.onnx"
     onnx_data_path = args.output_dir / "rps_policy.onnx.data"
     for old_path in (onnx_path, onnx_data_path):
         if old_path.exists():
             old_path.unlink()
-    export_onnx(selected_model, onnx_path, device)
-    if not onnx_data_path.is_file():
-        exported = onnx.load(str(onnx_path), load_external_data=True)
-        onnx.save_model(
-            exported,
-            str(onnx_path),
-            save_as_external_data=True,
-            all_tensors_to_one_file=True,
-            location=onnx_data_path.name,
-            size_threshold=0,
+    try:
+        export_onnx(selected_model, onnx_path, device)
+        if not onnx_data_path.is_file():
+            exported = onnx.load(str(onnx_path), load_external_data=True)
+            onnx.save_model(
+                exported,
+                str(onnx_path),
+                save_as_external_data=True,
+                all_tensors_to_one_file=True,
+                location=onnx_data_path.name,
+                size_threshold=0,
+            )
+        onnx_validation = validate_onnx(selected_model, onnx_path)
+        if not onnx_data_path.is_file():
+            raise RuntimeError("ONNX export did not produce its required external-data companion file.")
+        export_json_weights(selected_model, args.output_dir / "rps_policy.weights.json")
+        print(
+            f"Evaluating the candidate policy against ARC and GTO for "
+            f"{args.typescript_episodes} authoritative games each...",
+            flush=True,
         )
-    onnx_validation = validate_onnx(selected_model, onnx_path)
-    if not onnx_data_path.is_file():
-        raise RuntimeError("ONNX export did not produce its required external-data companion file.")
-    export_json_weights(selected_model, args.output_dir / "rps_policy.weights.json")
-    print(
-        f"Evaluating the deployed policy against ARC and GTO for "
-        f"{args.typescript_episodes} authoritative games each...",
-        flush=True,
-    )
-    typescript = evaluate_authoritative_typescript_bots(
-        args.typescript_episodes,
-        args.seed + 40_000_000,
-        args.output_dir / "server-bot-evaluation.json",
-    )
+        typescript = evaluate_authoritative_typescript_bots(
+            args.typescript_episodes,
+            args.seed + 40_000_000,
+            args.output_dir / "candidate-server-bot-evaluation.json",
+        )
+    except Exception:
+        restore_previous_deployment()
+        raise
+
+    authoritative_gate: dict[str, Any]
+    if baseline_typescript:
+        changes = {
+            opponent: typescript[opponent]["winRate"] - baseline_typescript[opponent]["winRate"]
+            for opponent in ("ARC", "GTO")
+        }
+        aggregate_change = sum(changes.values()) / len(changes)
+        promotion_ready = aggregate_change > 0 and min(changes.values()) >= -0.02
+        authoritative_gate = {
+            "baseline": baseline_typescript,
+            "candidate": typescript,
+            "win_rate_change": changes,
+            "aggregate_win_rate_change": aggregate_change,
+            "promotion_ready": promotion_ready,
+            "rule": (
+                "Candidate aggregate win rate must improve and neither ARC nor GTO "
+                "win rate may regress by more than 0.02."
+            ),
+        }
+    else:
+        promotion_ready = True
+        authoritative_gate = {
+            "baseline": None,
+            "candidate": typescript,
+            "promotion_ready": True,
+            "rule": "No deployed baseline existed; authoritative candidate results are recorded.",
+        }
+
+    if not promotion_ready:
+        rejection_path = args.output_dir / "promotion-rejection.json"
+        restore_previous_deployment()
+        rejection_path.write_text(
+            json.dumps(authoritative_gate, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        raise RuntimeError(
+            f"Candidate failed the authoritative promotion gate; the previous deployment "
+            f"was restored. See {rejection_path}."
+        )
 
     report = {
         "schema_version": 1,
@@ -355,14 +455,15 @@ def main() -> None:
             "checkpoint": selected_name,
             "update": int(selected_checkpoint["update"]),
             "checkpoint_sha256": sha256(checkpoint_bytes[selected_name]).hexdigest(),
-            "criterion": "highest matched-seed win rate versus Python heuristic",
+            "criterion": "highest aggregate matched-seed win rate versus Python ARC/GTO-style bots",
         },
-        "matched_python_heuristic": matched,
+        "matched_python_scripted_bots": matched,
         "best_checkpoint_vs_final_checkpoint": {
             "perspective": "best.pt",
             **head_to_head,
         },
         "authoritative_typescript_bots": typescript,
+        "authoritative_promotion_gate": authoritative_gate,
         "seeds": {
             "base": args.seed,
             "checkpoint_environment": args.seed,
@@ -377,7 +478,7 @@ def main() -> None:
     deployed_spec = source_spec | {
         "deployed_checkpoint": report["selection"],
         "deployment_evaluation": {
-            "matched_python_heuristic": matched[selected_name],
+            "matched_python_scripted_bots": matched[selected_name],
             "authoritative_typescript_bots": {
                 "ARC": typescript["ARC"],
                 "GTO": typescript["GTO"],
@@ -386,6 +487,9 @@ def main() -> None:
     }
     (args.output_dir / "model-spec.json").write_text(
         json.dumps(deployed_spec, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (args.output_dir / "server-bot-evaluation.json").write_text(
+        json.dumps(typescript, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     print(json.dumps(report, indent=2, sort_keys=True), flush=True)
 

@@ -1,4 +1,4 @@
-"""A fast, dependency-free two-player training environment.
+"""A fast, dependency-free two-duelist training environment.
 
 The environment mirrors the authoritative TypeScript rules at the decision
 level. Card instances are represented by symbols because cards of the same
@@ -15,11 +15,14 @@ from typing import Optional, Sequence
 
 SYMBOLS = ("rock", "paper", "scissors")
 SYMBOL_COUNT = len(SYMBOLS)
+MIN_TABLE_SEATS = 2
+MAX_TABLE_SEATS = 6
 COPIES_PER_SYMBOL = 6
 STARTING_HP = 10
 MAX_TOTAL_HP = STARTING_HP * 2
 MAX_HAND_SIZE = 5
 STARTING_HAND_SIZE = 3
+TRAINING_SCENARIOS = ("three_kind", "four_kind", "five_kind", "low_hp_draw", "max_hand")
 HEART_LEVELS = MAX_TOTAL_HP + 1
 ACTION_SIZE = SYMBOL_COUNT * HEART_LEVELS
 OBSERVATION_SIZE = 90
@@ -47,6 +50,8 @@ class PlayerState:
     drawn_count: int = 0
     discarded_count: int = 0
     paid_draw: bool = False
+    recent_loss_ratio: float = 0.0
+    discard_choices: list[int] = field(default_factory=list)
 
 
 def compare_symbols(left: int, right: int) -> int:
@@ -99,13 +104,29 @@ class RPSCardEnv:
 
     agents = ("player_0", "player_1")
 
-    def __init__(self, seed: Optional[int] = None, max_rounds: int = 100):
+    def __init__(
+        self,
+        seed: Optional[int] = None,
+        max_rounds: int = 100,
+        table_seats: int = 2,
+        scenario: Optional[str] = None,
+    ):
+        if table_seats < MIN_TABLE_SEATS or table_seats > MAX_TABLE_SEATS:
+            raise ValueError(
+                f"table_seats must be between {MIN_TABLE_SEATS} and {MAX_TABLE_SEATS}."
+            )
+        if scenario is not None and scenario not in TRAINING_SCENARIOS:
+            raise ValueError(f"Unknown training scenario: {scenario}.")
         self.max_rounds = max_rounds
+        self.table_seats = table_seats
+        self.copies_per_symbol = table_seats + 4
+        self.scenario = scenario
         self.rng = random.Random(seed)
         self.seed_value = seed
         self.players = [PlayerState(), PlayerState()]
         self.histories: list[list[PublicRoundMemory]] = [[], []]
         self.deck: list[int] = []
+        self.reserve_hands: list[list[int]] = []
         self.returned_cards: list[int] = []
         self.phase = "battle"
         self.round = 1
@@ -127,11 +148,16 @@ class RPSCardEnv:
         if seed is not None:
             self.seed_value = seed
             self.rng.seed(seed)
-        self.deck = [symbol for symbol in range(SYMBOL_COUNT) for _ in range(COPIES_PER_SYMBOL)]
+        self.deck = [
+            symbol
+            for symbol in range(SYMBOL_COUNT)
+            for _ in range(self.copies_per_symbol)
+        ]
         self.rng.shuffle(self.deck)
         self.players = [PlayerState(), PlayerState()]
         self.histories = [[], []]
         self.returned_cards = []
+        self.reserve_hands = [[] for _ in range(self.table_seats - 2)]
         self.phase = "battle"
         self.round = 1
         self.attacker = 0
@@ -145,7 +171,51 @@ class RPSCardEnv:
         for _ in range(STARTING_HAND_SIZE):
             for player in self.players:
                 player.hand.append(self._draw_one())
+            for reserve_hand in self.reserve_hands:
+                reserve_hand.append(self._draw_one())
+        if self.scenario:
+            self._apply_training_scenario(self.scenario)
         return self.observe(self.current_player), self.legal_action_mask()
+
+    def _apply_training_scenario(self, scenario: str) -> None:
+        """Start at a legal post-mandatory-draw state for curriculum training."""
+        scenarios: dict[str, tuple[list[list[int]], list[int]]] = {
+            "three_kind": ([[0, 0, 0, 1], [1, 1, 1, 2]], [STARTING_HP, STARTING_HP]),
+            "four_kind": ([[0, 0, 0, 0, 2], [1, 1, 1, 1, 0]], [STARTING_HP, STARTING_HP]),
+            "five_kind": ([[0, 0, 0, 0, 0, 2], [1, 1, 1, 1, 1, 0]], [STARTING_HP, STARTING_HP]),
+            "low_hp_draw": ([[0, 0, 0, 0, 2], [1, 1, 1, 1, 0]], [2, 2]),
+            "max_hand": ([[0, 0, 1, 1, 2, 2], [0, 1, 1, 2, 2, 0]], [STARTING_HP, STARTING_HP]),
+        }
+        hands, hit_points = scenarios[scenario]
+        self.deck = [
+            symbol
+            for symbol in range(SYMBOL_COUNT)
+            for _ in range(self.copies_per_symbol)
+        ]
+        self.rng.shuffle(self.deck)
+        for hand in hands:
+            for symbol in hand:
+                self.deck.remove(symbol)
+        self.reserve_hands = [[] for _ in range(self.table_seats - 2)]
+        for _ in range(STARTING_HAND_SIZE):
+            for reserve_hand in self.reserve_hands:
+                reserve_hand.append(self._draw_one())
+        self.players = [PlayerState(), PlayerState()]
+        self.histories = [[], []]
+        for player_index, player in enumerate(self.players):
+            player.hand = hands[player_index][:]
+            player.hp = hit_points[player_index]
+            player.required_discards = max(len(player.hand) - MAX_HAND_SIZE, 1)
+            player.drawn_count = 1
+            self.histories[player_index].append(PublicRoundMemory(
+                hand_count=max(len(player.hand) - 1, STARTING_HAND_SIZE),
+                symbols=(player.hand[0], player.hand[1], player.hand[2]),
+                hearts=(0, 0, 0),
+            ))
+        self.phase = "buy"
+        self.current_player = self.attacker
+        self.actor_cursor = 0
+        self.lane = 0
 
     def _draw_one(self) -> int:
         if not self.deck:
@@ -181,7 +251,7 @@ class RPSCardEnv:
             mask[1] = player.hp > 1 and bool(self.deck)
         elif self.phase == "discard":
             for symbol in range(SYMBOL_COUNT):
-                mask[symbol] = symbol in player.hand
+                mask[symbol] = player.hand.count(symbol) > player.discard_choices.count(symbol)
         return mask
 
     def step(self, action: int) -> None:
@@ -229,7 +299,13 @@ class RPSCardEnv:
         totals, results = resolve_battle(cards, hearts)
         for player in range(2):
             state = self.players[player]
+            hp_before_battle = state.hp
             state.hp = totals[player]
+            state.recent_loss_ratio = (
+                max(hp_before_battle - totals[player], 0) / hp_before_battle
+                if hp_before_battle > 0
+                else 0.0
+            )
             state.no_loss_bonus = all(result >= 0 for result in results[player])
             self.histories[player].append(PublicRoundMemory(
                 hand_count=len(state.hand),
@@ -285,8 +361,7 @@ class RPSCardEnv:
 
     def _step_discard(self, action: int) -> None:
         player = self.players[self.current_player]
-        player.hand.remove(action)
-        self.returned_cards.append(action)
+        player.discard_choices.append(action)
         player.required_discards -= 1
         player.discarded_count += 1
         if player.required_discards > 0:
@@ -300,6 +375,9 @@ class RPSCardEnv:
 
     def _finish_discards(self) -> None:
         for player_index, player in enumerate(self.players):
+            for symbol in player.discard_choices:
+                player.hand.remove(symbol)
+                self.returned_cards.append(symbol)
             memory = self.histories[player_index][-1]
             memory.drawn_count = player.drawn_count
             memory.discarded_count = player.discarded_count
@@ -334,6 +412,7 @@ class RPSCardEnv:
             player.drawn_count = 0
             player.discarded_count = 0
             player.paid_draw = False
+            player.discard_choices = []
 
     @staticmethod
     def _five_of_a_kind(player: PlayerState) -> Optional[int]:
@@ -388,10 +467,13 @@ class RPSCardEnv:
         phase_index = self.lane if self.phase == "battle" else 3 if self.phase == "buy" else 4
         observation = [float(index == phase_index) for index in range(5)]
         observation.extend((player.hp / MAX_TOTAL_HP, opposing.hp / MAX_TOTAL_HP))
-        observation.extend(player.hand.count(symbol) / 8.0 for symbol in range(SYMBOL_COUNT))
+        observation.extend(
+            (player.hand.count(symbol) - player.discard_choices.count(symbol)) / 8.0
+            for symbol in range(SYMBOL_COUNT)
+        )
         observation.extend((
             len(opposing.hand) / 8.0,
-            len(self.deck) / (SYMBOL_COUNT * COPIES_PER_SYMBOL),
+            len(self.deck) / (SYMBOL_COUNT * self.copies_per_symbol),
             float(perspective == self.attacker),
             float(self.phase == "battle" and self.actor_cursor == 0),
             float(self.phase == "battle" and opposing.cards[self.lane] is not None),
@@ -421,8 +503,9 @@ class RPSCardEnv:
             "hp": [player.hp for player in self.players],
             "hand_counts": [len(player.hand) for player in self.players],
             "deck_count": len(self.deck),
+            "table_seats": self.table_seats,
+            "copies_per_symbol": self.copies_per_symbol,
             "terminated": self.terminated,
             "winner": self.winner,
             "reason": self.reason,
         }
-

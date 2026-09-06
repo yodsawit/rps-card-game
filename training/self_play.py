@@ -28,6 +28,7 @@ from training.rps_env import (
     SYMBOL_COUNT,
     SYMBOLS,
 )
+from training.scripted_bots import ScriptedBotState, advanced_action, arc_action
 
 
 class MaskedActorCritic(nn.Module):
@@ -92,44 +93,15 @@ def neural_action(
     return int(action_tensor.item()), float(log_probability.item()), float(value.item())
 
 
-def heuristic_action(env: RPSCardEnv, player_index: int, legal_mask: list[bool], rng: random.Random) -> int:
-    legal = [index for index, allowed in enumerate(legal_mask) if allowed]
-    if env.phase == "buy":
-        player = env.players[player_index]
-        largest_group = max(player.hand.count(symbol) for symbol in range(SYMBOL_COUNT))
-        return 1 if legal_mask[1] and player.hp >= 5 and largest_group >= 3 else 0
-    if env.phase == "discard":
-        player = env.players[player_index]
-        counts = [player.hand.count(symbol) for symbol in range(SYMBOL_COUNT)]
-        return min((symbol for symbol in range(SYMBOL_COUNT) if legal_mask[symbol]), key=lambda symbol: (counts[symbol], rng.random()))
-
-    player = env.players[player_index]
-    legal_symbols = sorted({action // HEART_LEVELS for action in legal})
-    prior_cards = [card for card in player.cards[: env.lane] if card is not None]
-    chosen_symbol: Optional[int] = None
-    if prior_cards and len(set(prior_cards)) == 1 and prior_cards[0] in legal_symbols:
-        chosen_symbol = prior_cards[0]
-    opponent_history = env.histories[1 - player_index]
-    predicted_symbol: Optional[int] = None
-    if opponent_history:
-        recent = opponent_history[-1].symbols
-        predicted_symbol = max(range(SYMBOL_COUNT), key=lambda symbol: recent.count(symbol))
-        counter = (predicted_symbol + 1) % SYMBOL_COUNT
-        if counter in legal_symbols:
-            chosen_symbol = counter
-    if chosen_symbol is None:
-        chosen_symbol = max(legal_symbols, key=lambda symbol: (player.hand.count(symbol), rng.random()))
-
-    remaining = player.hp - sum(player.hearts)
-    lanes_left = 3 - env.lane
-    target_hearts = remaining if env.lane == 2 else remaining // lanes_left
-    if predicted_symbol is not None and chosen_symbol == (predicted_symbol + 1) % SYMBOL_COUNT and env.lane < 2:
-        target_hearts = min(remaining, target_hearts + 1)
-    candidate = chosen_symbol * HEART_LEVELS + target_hearts
-    if legal_mask[candidate]:
-        return candidate
-    same_symbol = [action for action in legal if action // HEART_LEVELS == chosen_symbol]
-    return min(same_symbol or legal, key=lambda action: abs((action % HEART_LEVELS) - target_hearts))
+def heuristic_action(
+    env: RPSCardEnv,
+    player_index: int,
+    legal_mask: list[bool],
+    rng: random.Random,
+    state: Optional[ScriptedBotState] = None,
+) -> int:
+    """Backward-compatible name for the production-aligned ARC controller."""
+    return arc_action(env, player_index, legal_mask, rng, state or ScriptedBotState())
 
 
 def random_action(legal_mask: list[bool], rng: random.Random) -> int:
@@ -147,9 +119,12 @@ def play_episode(
     collect: bool = True,
     deterministic: bool = False,
     hp_reward_weight: float = 0.0,
+    table_seats: int = 2,
+    scenario: Optional[str] = None,
 ) -> EpisodeResult:
-    env = RPSCardEnv(seed=seed)
+    env = RPSCardEnv(seed=seed, table_seats=table_seats, scenario=scenario)
     rng = random.Random(seed ^ 0xA5A5A5A5)
+    scripted_state = ScriptedBotState()
     if mode == "self":
         controllers: list[Controller] = [learner, learner]
         collected_players = {0, 1}
@@ -161,8 +136,10 @@ def play_episode(
             if opponent_model is None:
                 raise ValueError("League play requires a frozen opponent model.")
             opponent = opponent_model
-        elif mode == "heuristic":
-            opponent = "heuristic"
+        elif mode in ("arc", "heuristic"):
+            opponent = "arc"
+        elif mode in ("gto", "advanced"):
+            opponent = "gto"
         elif mode == "random":
             opponent = "random"
         else:
@@ -181,8 +158,11 @@ def play_episode(
             action, log_probability, value = neural_action(
                 controller, observation, legal_mask, device, deterministic=deterministic
             )
-        elif controller == "heuristic":
-            action = heuristic_action(env, player, legal_mask, rng)
+        elif controller == "arc":
+            action = arc_action(env, player, legal_mask, rng, scripted_state)
+            log_probability, value = 0.0, 0.0
+        elif controller == "gto":
+            action = advanced_action(env, player, legal_mask, rng, scripted_state)
             log_probability, value = 0.0, 0.0
         else:
             action = random_action(legal_mask, rng)
@@ -282,12 +262,16 @@ def evaluate(
     device: torch.device,
     episodes: int,
     seed: int,
-    opponent: str = "heuristic",
+    opponent: str = "arc",
+    table_seats: tuple[int, ...] = (2, 3, 4, 5, 6),
+    policy_seed: Optional[int] = None,
 ) -> dict[str, float | int]:
     wins = losses = draws = 0
     total_rounds = 0
     for index in range(episodes):
         learner_seat = index % 2
+        if policy_seed is not None:
+            torch.manual_seed(policy_seed + index)
         result = play_episode(
             model,
             device,
@@ -296,6 +280,7 @@ def evaluate(
             learner_seat=learner_seat,
             collect=False,
             deterministic=False,
+            table_seats=table_seats[index % len(table_seats)],
         )
         total_rounds += result.rounds
         if result.winner is None:
@@ -312,6 +297,69 @@ def evaluate(
         "win_rate": wins / episodes,
         "non_loss_rate": (wins + draws) / episodes,
         "average_rounds": total_rounds / episodes,
+    }
+
+
+def evaluate_suite(
+    model: MaskedActorCritic,
+    device: torch.device,
+    episodes: int,
+    seed: int,
+    policy_seed: int,
+) -> dict[str, object]:
+    arc = evaluate(model, device, episodes, seed, "arc", policy_seed=policy_seed)
+    gto = evaluate(
+        model,
+        device,
+        episodes,
+        seed + 10_000_000,
+        "gto",
+        policy_seed=policy_seed + 10_000_000,
+    )
+    return {
+        "episodes_per_opponent": episodes,
+        "ARC": arc,
+        "GTO": gto,
+        "aggregate_win_rate": (float(arc["win_rate"]) + float(gto["win_rate"])) / 2,
+        "aggregate_non_loss_rate": (
+            float(arc["non_loss_rate"]) + float(gto["non_loss_rate"])
+        ) / 2,
+    }
+
+
+def promotion_comparison(
+    baseline: MaskedActorCritic,
+    candidate: MaskedActorCritic,
+    device: torch.device,
+    episodes: int,
+    seed: int,
+) -> dict[str, object]:
+    baseline_result = evaluate_suite(baseline, device, episodes, seed, seed + 30_000_000)
+    candidate_result = evaluate_suite(candidate, device, episodes, seed, seed + 30_000_000)
+    opponent_regressions = {
+        opponent: float(candidate_result[opponent]["win_rate"])  # type: ignore[index]
+        - float(baseline_result[opponent]["win_rate"])  # type: ignore[index]
+        for opponent in ("ARC", "GTO")
+    }
+    aggregate_gain = float(candidate_result["aggregate_win_rate"]) - float(
+        baseline_result["aggregate_win_rate"]
+    )
+    ready = aggregate_gain > 0 and min(opponent_regressions.values()) >= -0.02
+    return {
+        "schema_version": 1,
+        "fixed_seed": seed,
+        "episodes_per_opponent_per_checkpoint": episodes,
+        "table_seats": [2, 3, 4, 5, 6],
+        "baseline": baseline_result,
+        "fine_tuned": candidate_result,
+        "win_rate_change": opponent_regressions,
+        "aggregate_win_rate_change": aggregate_gain,
+        "promotion_ready": ready,
+        "promotion_rule": (
+            "Fine-tuned aggregate ARC/GTO-style win rate must improve and neither "
+            "opponent win rate may regress by more than 0.02. Final promotion still "
+            "requires the authoritative TypeScript gate."
+        ),
     }
 
 
@@ -367,6 +415,11 @@ def export_onnx(model: MaskedActorCritic, output_path: Path, device: torch.devic
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--updates", type=int, default=200)
+    parser.add_argument(
+        "--additional-updates",
+        type=int,
+        help="Train this many updates beyond the resumed checkpoint (or update zero).",
+    )
     parser.add_argument("--episodes-per-update", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=4)
     parser.add_argument("--minibatch-size", type=int, default=512)
@@ -376,25 +429,52 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--value-coefficient", type=float, default=0.5)
     parser.add_argument("--entropy-coefficient", type=float, default=0.015)
     parser.add_argument("--maximum-gradient-norm", type=float, default=0.5)
-    parser.add_argument("--heuristic-probability", type=float, default=0.2)
+    parser.add_argument("--arc-probability", type=float, default=0.25)
+    parser.add_argument("--gto-probability", type=float, default=0.25)
+    parser.add_argument(
+        "--heuristic-probability",
+        type=float,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--league-probability", type=float, default=0.25)
     parser.add_argument("--snapshot-every", type=int, default=10)
     parser.add_argument("--maximum-snapshots", type=int, default=8)
     parser.add_argument("--evaluate-every", type=int, default=10)
     parser.add_argument("--eval-episodes", type=int, default=100)
+    parser.add_argument("--final-eval-episodes", type=int, default=200)
     parser.add_argument("--save-every", type=int, default=10)
     parser.add_argument("--hp-reward-weight", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=20260906)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/rps-self-play"))
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--baseline-checkpoint", type=Path)
+    parser.add_argument("--promotion-eval-episodes", type=int, default=1_000)
+    parser.add_argument("--scenario-probability", type=float, default=0.25)
+    parser.add_argument(
+        "--table-seats",
+        default="2,3,4,5,6",
+        help="Comma-separated production table sizes to cycle through during training.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_arguments()
-    if args.heuristic_probability + args.league_probability > 1.0:
-        raise ValueError("Heuristic and league probabilities must sum to at most 1.")
+    arc_probability = (
+        args.arc_probability
+        if args.heuristic_probability is None
+        else args.heuristic_probability
+    )
+    if arc_probability + args.gto_probability + args.league_probability > 1.0:
+        raise ValueError("ARC, GTO, and league probabilities must sum to at most 1.")
+    table_seats = tuple(int(value.strip()) for value in args.table_seats.split(",") if value.strip())
+    if not table_seats or any(value < 2 or value > 6 for value in table_seats):
+        raise ValueError("--table-seats must contain only values from 2 through 6.")
+    if args.baseline_checkpoint and args.promotion_eval_episodes < 1_000:
+        raise ValueError("The fine-tune promotion gate requires at least 1,000 episodes per opponent.")
+    if args.scenario_probability < 0 or args.scenario_probability > 1:
+        raise ValueError("--scenario-probability must be between zero and one.")
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -413,14 +493,41 @@ def main() -> None:
         model.load_state_dict(checkpoint["model_state"])
         if "optimizer_state" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer_state"])
+        for parameter_group in optimizer.param_groups:
+            parameter_group["lr"] = args.learning_rate
         first_update = int(checkpoint.get("update", 0)) + 1
-        print(f"Resumed {args.resume} at update {first_update}.")
+        print(
+            f"Resumed {args.resume}; next update is {first_update} and optimizer "
+            f"learning rate is {args.learning_rate:g}."
+        )
 
-    snapshots: list[MaskedActorCritic] = []
+    final_update = (
+        first_update - 1 + args.additional_updates
+        if args.additional_updates is not None
+        else args.updates
+    )
+    if final_update < first_update:
+        raise ValueError("The requested final update is earlier than the next resumed update.")
+
+    baseline_model: Optional[MaskedActorCritic] = None
+    if args.baseline_checkpoint:
+        baseline_checkpoint = torch.load(
+            args.baseline_checkpoint, map_location=device, weights_only=False
+        )
+        baseline_model = MaskedActorCritic(
+            observation_size=int(baseline_checkpoint.get("observation_size", OBSERVATION_SIZE)),
+            hidden_size=int(baseline_checkpoint.get("hidden_size", args.hidden_size)),
+        ).to(device)
+        baseline_model.load_state_dict(baseline_checkpoint["model_state"])
+        baseline_model.eval()
+        for parameter in baseline_model.parameters():
+            parameter.requires_grad_(False)
+
+    snapshots: list[MaskedActorCritic] = [baseline_model] if baseline_model else []
     rng = random.Random(args.seed)
     started = time.time()
     best_win_rate = -1.0
-    for update in range(first_update, args.updates + 1):
+    for update in range(first_update, final_update + 1):
         model.eval()
         transitions: list[Transition] = []
         episode_results: list[EpisodeResult] = []
@@ -428,11 +535,38 @@ def main() -> None:
             roll = rng.random()
             learner_seat = (update * args.episodes_per_update + episode) % 2
             episode_seed = args.seed + update * 100_000 + episode
-            if roll < args.heuristic_probability:
+            episode_table_seats = table_seats[
+                (update * args.episodes_per_update + episode) % len(table_seats)
+            ]
+            scenario = None
+            if rng.random() < args.scenario_probability:
+                scenario_names = ("three_kind", "four_kind", "five_kind", "low_hp_draw", "max_hand")
+                scenario = scenario_names[
+                    (update * args.episodes_per_update + episode) % len(scenario_names)
+                ]
+            if roll < arc_probability:
                 result = play_episode(
-                    model, device, episode_seed, "heuristic", learner_seat, hp_reward_weight=args.hp_reward_weight
+                    model,
+                    device,
+                    episode_seed,
+                    "arc",
+                    learner_seat,
+                    hp_reward_weight=args.hp_reward_weight,
+                    table_seats=episode_table_seats,
+                    scenario=scenario,
                 )
-            elif roll < args.heuristic_probability + args.league_probability and snapshots:
+            elif roll < arc_probability + args.gto_probability:
+                result = play_episode(
+                    model,
+                    device,
+                    episode_seed,
+                    "gto",
+                    learner_seat,
+                    hp_reward_weight=args.hp_reward_weight,
+                    table_seats=episode_table_seats,
+                    scenario=scenario,
+                )
+            elif roll < arc_probability + args.gto_probability + args.league_probability and snapshots:
                 result = play_episode(
                     model,
                     device,
@@ -441,10 +575,18 @@ def main() -> None:
                     learner_seat,
                     opponent_model=rng.choice(snapshots),
                     hp_reward_weight=args.hp_reward_weight,
+                    table_seats=episode_table_seats,
+                    scenario=scenario,
                 )
             else:
                 result = play_episode(
-                    model, device, episode_seed, "self", hp_reward_weight=args.hp_reward_weight
+                    model,
+                    device,
+                    episode_seed,
+                    "self",
+                    hp_reward_weight=args.hp_reward_weight,
+                    table_seats=episode_table_seats,
+                    scenario=scenario,
                 )
             transitions.extend(result.transitions)
             episode_results.append(result)
@@ -466,16 +608,17 @@ def main() -> None:
             snapshots = snapshots[-args.maximum_snapshots :]
 
         evaluation = None
-        if update % args.evaluate_every == 0 or update == args.updates:
+        if update % args.evaluate_every == 0 or update == final_update:
             model.eval()
-            evaluation = evaluate(
+            evaluation = evaluate_suite(
                 model,
                 device,
                 args.eval_episodes,
                 args.seed + 50_000_000 + update * args.eval_episodes,
+                args.seed + 60_000_000 + update * args.eval_episodes,
             )
-            if float(evaluation["win_rate"]) > best_win_rate:
-                best_win_rate = float(evaluation["win_rate"])
+            if float(evaluation["aggregate_win_rate"]) > best_win_rate:
+                best_win_rate = float(evaluation["aggregate_win_rate"])
                 save_checkpoint(args.output_dir / "best.pt", model, optimizer, update, args)
 
         metric = {
@@ -485,7 +628,7 @@ def main() -> None:
             "average_rounds": float(np.mean([result.rounds for result in episode_results])),
             "modes": {
                 mode: sum(result.mode == mode for result in episode_results)
-                for mode in ("self", "heuristic", "league")
+                for mode in ("self", "arc", "gto", "league")
             },
             "snapshots": len(snapshots),
             "elapsed_seconds": round(time.time() - started, 2),
@@ -494,19 +637,38 @@ def main() -> None:
         }
         with metrics_path.open("a", encoding="utf-8") as metrics_file:
             metrics_file.write(json.dumps(metric, sort_keys=True) + "\n")
-        evaluation_text = "" if not evaluation else f" eval_win={float(evaluation['win_rate']):.3f}"
+        evaluation_text = "" if not evaluation else f" eval_win={float(evaluation['aggregate_win_rate']):.3f}"
         print(
             f"update={update:04d} samples={len(transitions):5d} "
             f"policy={losses['policy_loss']:+.4f} value={losses['value_loss']:.4f} "
             f"entropy={losses['entropy']:.3f}{evaluation_text}"
         )
-        if update % args.save_every == 0 or update == args.updates:
+        if update % args.save_every == 0 or update == final_update:
             save_checkpoint(args.output_dir / "latest.pt", model, optimizer, update, args)
 
     model.eval()
-    final_evaluation = evaluate(model, device, max(args.eval_episodes, 200), args.seed + 90_000_000)
-    save_checkpoint(args.output_dir / "final.pt", model, optimizer, args.updates, args)
+    final_evaluation = evaluate_suite(
+        model,
+        device,
+        max(args.eval_episodes, args.final_eval_episodes),
+        args.seed + 90_000_000,
+        args.seed + 100_000_000,
+    )
+    save_checkpoint(args.output_dir / "final.pt", model, optimizer, final_update, args)
     export_onnx(model, args.output_dir / "rps_policy.onnx", device)
+    fine_tune_evaluation = None
+    if baseline_model:
+        fine_tune_evaluation = promotion_comparison(
+            baseline_model,
+            model,
+            device,
+            args.promotion_eval_episodes,
+            args.seed + 110_000_000,
+        )
+        (args.output_dir / "fine-tune-evaluation.json").write_text(
+            json.dumps(fine_tune_evaluation, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     specification = {
         "schema_version": 1,
         "observation_size": OBSERVATION_SIZE,
@@ -520,13 +682,28 @@ def main() -> None:
         },
         "reward": "terminal win=1, draw=0, loss=-1 plus optional zero-sum HP tie-break",
         "hp_reward_weight": args.hp_reward_weight,
-        "final_evaluation_vs_python_heuristic": final_evaluation,
-        "training_arguments": vars(args) | {"output_dir": str(args.output_dir), "resume": str(args.resume) if args.resume else None},
+        "training_table_seats": list(table_seats),
+        "scripted_opponents": {
+            "ARC": "production-aligned symbol-level port",
+            "GTO": "public-memory sampling plus approximate Bayesian maximin",
+        },
+        "final_evaluation_vs_python_scripted_bots": final_evaluation,
+        "fine_tune_promotion_gate": fine_tune_evaluation,
+        "training_arguments": vars(args) | {
+            "output_dir": str(args.output_dir),
+            "resume": str(args.resume) if args.resume else None,
+            "baseline_checkpoint": str(args.baseline_checkpoint) if args.baseline_checkpoint else None,
+            "final_update": final_update,
+            "effective_arc_probability": arc_probability,
+        },
     }
     (args.output_dir / "model-spec.json").write_text(json.dumps(specification, indent=2), encoding="utf-8")
-    print(json.dumps({"output_dir": str(args.output_dir), "final_evaluation": final_evaluation}, indent=2))
+    print(json.dumps({
+        "output_dir": str(args.output_dir),
+        "final_evaluation": final_evaluation,
+        "fine_tune_promotion_gate": fine_tune_evaluation,
+    }, indent=2))
 
 
 if __name__ == "__main__":
     main()
-
