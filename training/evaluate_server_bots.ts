@@ -50,9 +50,11 @@ function evaluate(opponentDifficulty: BotDifficulty, episodes: number, baseSeed:
     host.socketId = null;
     manager.startRoom(receipt.roomCode, receipt.playerId, ++now);
 
-    for (let guard = 0; room.game!.phase !== "finished" && guard < 100; guard += 1) {
+    for (let guard = 0; room.game!.phase !== "finished" && guard < 200; guard += 1) {
       const game = room.game!;
-      if (game.phase !== "battle" || game.deadlineAt === null) {
+      const automatedPhase = game.phase === "battle"
+        || (game.phase === "targeting" && game.defenderId !== null);
+      if (!automatedPhase || game.deadlineAt === null) {
         throw new Error(`Automated match stopped unexpectedly in ${game.phase}.`);
       }
       now = game.deadlineAt;

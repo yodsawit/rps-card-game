@@ -79,6 +79,7 @@ export function snapshotFor(room: Room, viewer: RoomPlayer, now: number): Server
       selfPlayerId: viewer.id,
       hostPlayerId: room.hostPlayerId,
       maximumSeats: 6,
+      actionTimeMs: room.actionTimeMs,
       players: room.players.map((player, seatIndex) => ({
         id: player.id,
         seatIndex,

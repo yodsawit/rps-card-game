@@ -1,4 +1,10 @@
 import type { BotDifficulty } from "@rps/game-core";
+import type { ActionTimeLimit } from "./types.js";
+
+export function cleanActionTimeLimit(value: unknown): ActionTimeLimit {
+  if (value === 20_000 || value === 30_000 || value === null) return value;
+  throw new Error("Action timer must be 20 seconds, 30 seconds, or no limit.");
+}
 
 export function cleanBotDifficulty(value: unknown): BotDifficulty {
   if (value === "basic" || value === "advanced" || value === "learned") return value;

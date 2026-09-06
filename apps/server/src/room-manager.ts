@@ -6,6 +6,7 @@ import {
   assertMatchInvariants,
   autoCompleteDiscards,
   autoCompletePreparationPair,
+  beginPreparation,
   chooseAdvancedPair,
   chooseAdvancedDiscards,
   chooseAdvancedTarget,
@@ -33,7 +34,7 @@ import {
   type MatchState,
   type RandomSource
 } from "@rps/game-core";
-import type { SessionReceipt } from "@rps/protocol";
+import type { ActionTimeLimit, SessionReceipt } from "@rps/protocol";
 import {
   chooseLearnedDiscards,
   chooseLearnedPair,
@@ -69,6 +70,7 @@ export class RoomManager {
     const room: Room = {
       code: this.roomCode(),
       hostPlayerId: host.id,
+      actionTimeMs: 20_000,
       players: [host],
       game: null,
       knownHands: new Map(),
@@ -119,6 +121,13 @@ export class RoomManager {
     const index = room.players.findIndex((player) => player.id === botId && player.isBot);
     if (index < 0) throw new Error("That computer seat does not exist.");
     room.players.splice(index, 1);
+    this.changed(room, now);
+  }
+
+  setActionTime(roomCode: string, playerId: string, actionTimeMs: ActionTimeLimit, now: number): void {
+    const room = this.lobbyRoom(roomCode);
+    this.requireHost(room, playerId);
+    room.actionTimeMs = actionTimeMs;
     this.changed(room, now);
   }
 
@@ -285,7 +294,8 @@ export class RoomManager {
     const game = room.game;
     if (!game || game.phase === "finished" || game.deadlineAt === null || now < game.deadlineAt) return;
     if (game.phase === "targeting") {
-      this.selectRoomOpponent(room, game.attackerId, clockwiseOpponentId(game), now, "timeout");
+      if (game.defenderId !== null) beginPreparation(game, now);
+      else this.selectRoomOpponent(room, game.attackerId, clockwiseOpponentId(game), now, "timeout");
     } else if (game.phase === "preparation") {
       autoCompletePreparationPair(game);
       this.advancePreparation(room, now);
@@ -323,6 +333,7 @@ export class RoomManager {
     if (!game) return;
     for (let guard = 0; guard < 30 && game.phase !== "finished"; guard += 1) {
       if (game.phase === "targeting") {
+        if (game.defenderId !== null) return;
         const attacker = game.players.find((player) => player.id === game.attackerId)!;
         const living = game.players.filter((player) => !player.eliminated);
         if (living.length === 2) {
@@ -550,7 +561,12 @@ export class RoomManager {
       randomUUID(),
       room.players.map((player) => ({ id: player.id, name: player.name, isBot: player.isBot })),
       now,
-      this.random
+      this.random,
+      {
+        targetSelectionMs: room.actionTimeMs,
+        preparationMs: room.actionTimeMs,
+        discardMs: room.actionTimeMs
+      }
     );
     this.study(room, now, "match_started", {
       players: room.players.map((player, seatIndex) => ({
@@ -564,7 +580,10 @@ export class RoomManager {
         startingHp: room.game.config.startingHp,
         startingHandSize: room.game.config.startingHandSize,
         maximumHandSize: room.game.config.maximumHandSize,
-        copiesPerSymbol: room.game.config.copiesPerSymbol
+        copiesPerSymbol: room.game.config.copiesPerSymbol,
+        actionTimeMs: room.actionTimeMs,
+        duelIntroMs: room.game.config.duelIntroMs,
+        battleRevealMs: room.game.config.battleRevealMs
       }
     });
   }

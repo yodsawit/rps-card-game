@@ -13,16 +13,25 @@ import type {
   SessionReceipt
 } from "@rps/protocol";
 import { startEffects } from "./fx.js";
+import { GameAudio } from "./audio.js";
 
 const SESSION_KEY = "rps-session-v1";
 const NAME_KEY = "rps-player-name";
 const LANE_NAMES = ["LEFT", "CENTER", "RIGHT"] as const;
 
+interface PokerPosition {
+  playerId: string;
+  x: number;
+  y: number;
+}
+
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const toast = document.querySelector<HTMLDivElement>("#toast")!;
-if (!app || !toast) throw new Error("Application shell is missing.");
+const audioControls = document.querySelector<HTMLDivElement>("#audio-controls")!;
+if (!app || !toast || !audioControls) throw new Error("Application shell is missing.");
 
 const effects = startEffects();
+const gameAudio = new GameAudio(audioControls);
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, (character) => ({
@@ -86,6 +95,8 @@ class RpsClient {
   private serverOffset = 0;
   private activeBattleSequence: { key: string; startedAt: number; timers: number[] } | null = null;
   private readonly completedBattleSequences = new Set<string>();
+  private activeOutcomeSequence: { key: string; startedAt: number; timer: number } | null = null;
+  private readonly completedOutcomeSequences = new Set<string>();
   private readonly firedBattleMoments = new Set<string>();
   private readonly animatedDrawCards = new Set<string>();
   private readonly revealedPairs = new Set<string>();
@@ -107,6 +118,8 @@ class RpsClient {
         snapshot.round === 1
       ) {
         this.completedBattleSequences.clear();
+        this.clearOutcomeTimer();
+        this.completedOutcomeSequences.clear();
         this.firedBattleMoments.clear();
         this.animatedDrawCards.clear();
         this.revealedPairs.clear();
@@ -156,31 +169,144 @@ class RpsClient {
     app.innerHTML = `
       <main class="landing shell">
         <section class="brand-block">
-          <p class="eyebrow">THREE CARDS. TEN HEARTS. NO SAFE BETS.</p>
           <h1><span>R</span><span>P</span><span>S</span></h1>
           <p class="tagline">Read the board. Hide the hand. Put your hearts where your nerve is.</p>
         </section>
         <section class="lobby-panel glass-panel">
           <label class="field-label" for="player-name">CALLSIGN</label>
           <input id="player-name" maxlength="18" autocomplete="nickname" value="${savedName}" placeholder="Player name" />
-          <button class="primary wide" data-action="create">
-            <span>CREATE ROOM</span><small>Invite players or add computer seats</small>
-          </button>
+          <button class="primary wide" data-action="create">CREATE ROOM</button>
           <div class="join-row">
             <input id="room-code" maxlength="5" autocomplete="off" placeholder="ROOM CODE" />
             <button class="ghost" data-action="join">JOIN</button>
           </div>
-          <div class="rules-strip"><span>2–6 SEATS</span><span>3 PAIRS</span><span>20 SECONDS</span></div>
+          <button class="tutorial-launch" data-action="how-to">HOW TO PLAY</button>
         </section>
       </main>
       <footer class="landing-footer">ROCK BREAKS SCISSORS · SCISSORS CUT PAPER · PAPER COVERS ROCK</footer>
     `;
     app.querySelector<HTMLElement>("[data-action='create']")?.addEventListener("click", () => this.create());
     app.querySelector<HTMLElement>("[data-action='join']")?.addEventListener("click", () => this.join());
+    app.querySelector<HTMLElement>("[data-action='how-to']")?.addEventListener("click", () => this.openTutorial());
     app.querySelector<HTMLInputElement>("#room-code")?.addEventListener("input", (event) => {
       const target = event.currentTarget as HTMLInputElement;
       target.value = target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
     });
+  }
+
+  private openTutorial(): void {
+    const slides = [
+      {
+        eyebrow: "THE OBJECTIVE",
+        title: "Outread the table.",
+        copy: `
+          <p>Every player begins with <strong>10 HP</strong> and draws three cards from the shared deck.</p>
+          <ul><li>Rock breaks Scissors.</li><li>Scissors cut Paper.</li><li>Paper covers Rock.</li></ul>
+          <p>Be the last player with HP, or reveal five identical cards after discarding.</p>`,
+        visual: `<div class="tutorial-rps" aria-label="Rock beats Scissors, Scissors beat Paper, Paper beats Rock">
+          ${(["rock", "paper", "scissors"] as const).map((symbol) => `<div class="tutorial-card face ${symbol}">${cardFace(symbol, true)}</div>`).join("")}
+          <span class="tutorial-cycle">BEATS&nbsp; →</span>
+        </div>`
+      },
+      {
+        eyebrow: "1 · CHOOSE",
+        title: "Pick your opponent.",
+        copy: `
+          <p>Attack turns move clockwise. When it is your turn, click any living opponent at the poker table.</p>
+          <p>Everyone can see each player’s HP and hand size. With only two players left, the opponent is selected automatically.</p>`,
+        visual: `<div class="tutorial-table" aria-hidden="true">
+          <span class="tutorial-seat you">YOU<small>ATTACKER</small></span>
+          <span class="tutorial-seat target">ARC-1<small>&hearts; 10</small></span>
+          <span class="tutorial-seat waiting-seat">GTO-1<small>WAITING</small></span>
+          <b>CHOOSE</b>
+        </div>`
+      },
+      {
+        eyebrow: "2 · COMMIT",
+        title: "Cards first. Hearts second.",
+        copy: `
+          <p>Commit one face-down card and its HP for each pair, moving from left to right. Once committed, neither the card nor its HP can be taken back.</p>
+          <p>The host chooses a 20-second, 30-second, or unlimited action timer. Locking without a card uses your leftmost card with 0 HP. A timed-out final pair still receives all remaining HP.</p>`,
+        visual: `<div class="tutorial-lanes" aria-label="Commit three card pairs from left to right">
+          ${[0, 1, 2].map((index) => `<div class="tutorial-lane ${index === 0 ? "active" : ""}"><small>${LANE_NAMES[index]}</small><div class="tutorial-card back">${cardBack()}</div><b>♥ ${index === 0 ? 3 : index === 1 ? "?" : "ALL"}</b></div>`).join("")}
+        </div>`
+      },
+      {
+        eyebrow: "3 · CLASH",
+        title: "Reveal, then settle.",
+        copy: `
+          <p>Each committed pair reveals before the next pair begins. Once all three are ready, the clashes resolve from left to right.</p>
+          <p>The winning card receives the loser’s HP minus one. Draws return both wagers. Playing three identical cards turns matching draws into wins for that player.</p>`,
+        visual: `<div class="tutorial-clash" aria-label="Paper defeats Rock and receives four of five committed hearts">
+          <div class="tutorial-card face rock">${cardFace("rock", true)}<b>♥ 5</b></div>
+          <span><small>CLASH</small><strong>−1</strong></span>
+          <div class="tutorial-card face paper">${cardFace("paper", true)}<b>♥ 2 → 6</b></div>
+        </div>`
+      },
+      {
+        eyebrow: "4 · RESHUFFLE",
+        title: "Rebuild—or end it.",
+        copy: `
+          <p>Draw one card, then return the required cards to the shared deck. Lose no pairs to earn a bonus draw. You may also spend 1 HP for one extra draw and one extra discard.</p>
+          <p>Your hand can hold at most five cards. Five matching cards after discard wins immediately. A player at 0 HP is eliminated.</p>`,
+        visual: `<div class="tutorial-draw" aria-label="Draw from the shared deck toward a five-card hand">
+          <div class="tutorial-deck">${cardBack()}<small>SHARED DECK</small></div><span>→</span>
+          <div class="tutorial-five">${Array.from({ length: 5 }, (_, index) => `<i style="--card:${index}"></i>`).join("")}<b>FIVE OF A KIND</b></div>
+        </div>`
+      }
+    ];
+
+    const dialog = document.createElement("dialog");
+    dialog.className = "tutorial-dialog";
+    dialog.setAttribute("aria-labelledby", "tutorial-title");
+    let slideIndex = 0;
+    let touchStartX: number | null = null;
+
+    const close = (): void => dialog.close();
+    const show = (nextIndex: number): void => {
+      slideIndex = Math.min(Math.max(nextIndex, 0), slides.length - 1);
+      const slide = slides[slideIndex]!;
+      dialog.innerHTML = `
+        <article class="tutorial-shell">
+          <header><span>${String(slideIndex + 1).padStart(2, "0")} / ${String(slides.length).padStart(2, "0")}</span><button class="tutorial-close" type="button" aria-label="Close how to play">×</button></header>
+          <div class="tutorial-content" aria-live="polite">
+            <div class="tutorial-visual">${slide.visual}</div>
+            <section class="tutorial-copy"><p class="eyebrow">${slide.eyebrow}</p><h2 id="tutorial-title">${slide.title}</h2>${slide.copy}</section>
+          </div>
+          <footer>
+            <button class="ghost tutorial-back" type="button" ${slideIndex === 0 ? "disabled" : ""}>BACK</button>
+            <nav aria-label="Tutorial slides">${slides.map((_, index) => `<button class="tutorial-dot ${index === slideIndex ? "active" : ""}" type="button" data-tutorial-slide="${index}" aria-label="Go to slide ${index + 1}" ${index === slideIndex ? 'aria-current="step"' : ""}></button>`).join("")}</nav>
+            <button class="primary tutorial-next" type="button">${slideIndex === slides.length - 1 ? "GOT IT" : "NEXT"}</button>
+          </footer>
+        </article>`;
+      dialog.querySelector<HTMLElement>(".tutorial-close")?.addEventListener("click", close);
+      dialog.querySelector<HTMLElement>(".tutorial-back")?.addEventListener("click", () => show(slideIndex - 1));
+      dialog.querySelector<HTMLElement>(".tutorial-next")?.addEventListener("click", () => {
+        if (slideIndex === slides.length - 1) close();
+        else show(slideIndex + 1);
+      });
+      dialog.querySelectorAll<HTMLElement>("[data-tutorial-slide]").forEach((button) => {
+        button.addEventListener("click", () => show(Number(button.dataset.tutorialSlide)));
+      });
+    };
+
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowRight") show(slideIndex + 1);
+      if (event.key === "ArrowLeft") show(slideIndex - 1);
+    });
+    dialog.addEventListener("touchstart", (event) => {
+      touchStartX = event.changedTouches[0]?.clientX ?? null;
+    }, { passive: true });
+    dialog.addEventListener("touchend", (event) => {
+      if (touchStartX === null) return;
+      const distance = (event.changedTouches[0]?.clientX ?? touchStartX) - touchStartX;
+      if (Math.abs(distance) > 55) show(slideIndex + (distance < 0 ? 1 : -1));
+      touchStartX = null;
+    }, { passive: true });
+    dialog.addEventListener("close", () => dialog.remove(), { once: true });
+    document.body.append(dialog);
+    show(0);
+    dialog.showModal();
   }
 
   private playerName(): string {
@@ -212,11 +338,10 @@ class RpsClient {
 
   private renderWaitingRoom(view: LobbySnapshot): void {
     const isHost = view.selfPlayerId === view.hostPlayerId;
-    const self = view.players.find((player) => player.id === view.selfPlayerId)!;
     const seats = Array.from({ length: view.maximumSeats }, (_, seatIndex) => {
       const player = view.players.find((candidate) => candidate.seatIndex === seatIndex);
       if (!player) {
-        return `<li class="lobby-seat empty-seat"><span>${seatIndex + 1}</span><div><strong>OPEN SEAT</strong><small>Waiting for player or bot</small></div></li>`;
+        return `<li class="lobby-seat empty-seat"><span>${seatIndex + 1}</span><div><strong>OPEN SEAT</strong></div></li>`;
       }
       return `
         <li class="lobby-seat ${player.id === view.hostPlayerId ? "host-seat" : ""}">
@@ -233,10 +358,22 @@ class RpsClient {
       <main class="waiting shell">
         <section class="glass-panel waiting-card group-lobby">
           <div class="lobby-heading">
-            <div><p class="eyebrow">ROOM READY</p><h2>${escapeHtml(self.name)}, choose your table.</h2></div>
+            <h2 class="room-ready-title">ROOM READY</h2>
             <div><small>ROOM CODE</small><button class="room-code" data-action="copy" aria-label="Copy room code">${escapeHtml(view.roomCode)}</button></div>
           </div>
-          <p class="muted">Share the code with players on this server. The host may fill any open seat with a computer.</p>
+          <section class="lobby-timer" aria-label="Action timer">
+            <strong>ACTION TIMER</strong>
+            ${isHost ? `<div class="timer-dropdown" data-timer-dropdown>
+              <button type="button" class="timer-select-trigger" data-action="toggle-timer" aria-haspopup="listbox" aria-expanded="false">
+                <span>${view.actionTimeMs === null ? "NO LIMIT" : `${view.actionTimeMs / 1_000} SEC`}</span><i aria-hidden="true"></i>
+              </button>
+              <div class="timer-select-menu" role="listbox" aria-label="Choose action timer">
+                <button type="button" role="option" aria-selected="${view.actionTimeMs === 20_000}" class="${view.actionTimeMs === 20_000 ? "active" : ""}" data-action-time="20000">20 SEC</button>
+                <button type="button" role="option" aria-selected="${view.actionTimeMs === 30_000}" class="${view.actionTimeMs === 30_000 ? "active" : ""}" data-action-time="30000">30 SEC</button>
+                <button type="button" role="option" aria-selected="${view.actionTimeMs === null}" class="${view.actionTimeMs === null ? "active" : ""}" data-action-time="none">NO LIMIT</button>
+              </div>
+            </div>` : `<b>${view.actionTimeMs === null ? "NO LIMIT" : `${view.actionTimeMs / 1_000} SEC`}</b>`}
+          </section>
           <ol class="lobby-seats">${seats}</ol>
           <div class="lobby-actions">
             ${isHost ? `
@@ -257,6 +394,34 @@ class RpsClient {
     app.querySelector<HTMLElement>("[data-action='add-basic-bot']")?.addEventListener("click", () => this.socket.emit("room:add-bot", { difficulty: "basic" }));
     app.querySelector<HTMLElement>("[data-action='add-advanced-bot']")?.addEventListener("click", () => this.socket.emit("room:add-bot", { difficulty: "advanced" }));
     app.querySelector<HTMLElement>("[data-action='add-learned-bot']")?.addEventListener("click", () => this.socket.emit("room:add-bot", { difficulty: "learned" }));
+    const timerDropdown = app.querySelector<HTMLElement>("[data-timer-dropdown]");
+    const timerTrigger = timerDropdown?.querySelector<HTMLButtonElement>("[data-action='toggle-timer']");
+    timerTrigger?.addEventListener("click", () => {
+      const isOpen = timerDropdown!.classList.toggle("open");
+      timerTrigger.setAttribute("aria-expanded", String(isOpen));
+    });
+    timerDropdown?.addEventListener("focusout", () => {
+      window.setTimeout(() => {
+        if (!timerDropdown.contains(document.activeElement)) {
+          timerDropdown.classList.remove("open");
+          timerTrigger?.setAttribute("aria-expanded", "false");
+        }
+      });
+    });
+    timerDropdown?.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      timerDropdown.classList.remove("open");
+      timerTrigger?.setAttribute("aria-expanded", "false");
+      timerTrigger?.focus();
+    });
+    app.querySelectorAll<HTMLButtonElement>("[data-action-time]").forEach((option) => {
+      option.addEventListener("click", () => {
+        const actionTimeMs = option.dataset.actionTime === "none" ? null : Number(option.dataset.actionTime) as 20_000 | 30_000;
+        timerDropdown?.classList.remove("open");
+        timerTrigger?.setAttribute("aria-expanded", "false");
+        this.socket.emit("room:set-action-time", { actionTimeMs });
+      });
+    });
     app.querySelector<HTMLElement>("[data-action='start']")?.addEventListener("click", () => this.socket.emit("room:start"));
     app.querySelectorAll<HTMLElement>("[data-remove-bot]").forEach((button) => {
       button.addEventListener("click", () => this.socket.emit("room:remove-bot", { playerId: button.dataset.removeBot! }));
@@ -276,31 +441,35 @@ class RpsClient {
       ? (bottom.id === attacker.id ? defender : attacker)
       : view.players.find((player) => !player.eliminated && player.id !== attacker.id) ?? attacker;
     const sequencePending = this.shouldAnimateBattle(view);
+    const outcomeSequencePending = view.phase === "finished"
+      && !sequencePending
+      && view.outcome !== null
+      && !this.completedOutcomeSequences.has(this.outcomeKey(view));
     const displayBottomHp = sequencePending ? this.hpBeforeBattle(view, bottom.id) : bottom.hp;
-    const headerPlayer = view.phase === "targeting" ? attacker : opponent;
-    const displayHeaderHp = sequencePending ? this.hpBeforeBattle(view, headerPlayer.id) : headerPlayer.hp;
     const unassigned = view.phase === "preparation" && selfIsDuelist
       ? self.hp - self.slots.reduce((total, slot) => total + slot.hearts, 0)
       : 0;
-    const body = view.phase === "targeting"
-      ? this.targetTable(view, self, attacker)
-      : view.phase === "discard"
-        ? selfIsDuelist
-          ? this.discardPanel(view, self, opponent)
-          : this.spectatorPanel(view, attacker, defender)
-        : this.battleBoard(view, self, bottom, opponent, unassigned, displayBottomHp, sequencePending);
+    const body = view.phase === "finished" && !sequencePending
+      ? this.finalTable(view)
+      : view.phase === "targeting"
+        ? this.targetTable(view, self, attacker)
+        : view.phase === "discard"
+          ? selfIsDuelist
+            ? this.discardPanel(view, self, opponent)
+            : this.spectatorPanel(view, attacker, defender)
+          : this.battleBoard(view, self, bottom, opponent, unassigned, displayBottomHp, sequencePending);
 
     app.innerHTML = `
       <main class="match-shell">
         <header class="match-header">
-          <div class="identity opponent-id">
-            <span class="connection ${headerPlayer.connected ? "online" : "offline"}"></span>
-            <div><small>${view.phase === "targeting" ? "ACTIVE ATTACKER" : "TOP DUELIST"}</small><strong>${escapeHtml(headerPlayer.name)}${headerPlayer.isBot ? headerPlayer.botDifficulty === "advanced" ? " // GTO" : headerPlayer.botDifficulty === "learned" ? " // RL" : " // CPU" : ""}</strong></div>
-            <span class="total-hp" data-total-player="${headerPlayer.id}">♥ ${displayHeaderHp}</span>
+          <div class="identity self-id" aria-label="Your player information">
+            <strong>${escapeHtml(self.name)}</strong>
+            <span class="header-private-hand" aria-label="Your cards">${view.self.hand.map((card) => `<i class="header-card-symbol ${card.symbol}" title="${symbolLabel(card.symbol)}">${symbolGraphic(card.symbol)}</i>`).join("")}</span>
+            <span class="total-hp">♥ ${self.hp}</span>
           </div>
           <div class="round-clock">
             <small>ROUND ${view.round}</small>
-            <strong>${sequencePending ? "REVEAL" : view.phase === "preparation" ? `${LANE_NAMES[view.activeLane]} PAIR` : phaseLabel(view.phase)}</strong>
+            <strong>${sequencePending ? "REVEAL" : view.phase === "targeting" && view.defenderId ? "DUEL SELECTED" : view.phase === "preparation" ? `${LANE_NAMES[view.activeLane]} PAIR` : phaseLabel(view.phase)}</strong>
             <span id="phase-clock">--:--</span>
           </div>
           <div class="header-actions">
@@ -310,61 +479,169 @@ class RpsClient {
         </header>
         ${body}
       </main>
-      ${view.phase === "finished" && !sequencePending ? this.resultOverlay(view, self) : ""}
+      ${view.phase === "finished" && !sequencePending && !outcomeSequencePending ? this.resultOverlay(view, self) : ""}
     `;
 
-    this.bindMatch(view, self, unassigned, selfIsDuelist);
+    this.bindMatch(view, self, selfIsDuelist);
     this.updateClock();
     this.startPairReveal(view);
     this.startBattleSequence(view);
     this.startDrawSequence(view);
+    this.startOutcomeSequence(view, self, sequencePending);
+  }
+
+  private pokerPositions(view: MatchSnapshot): PokerPosition[] {
+    const selfIndex = view.players.findIndex((player) => player.id === view.selfPlayerId);
+    const seatCount = view.players.length;
+    return view.players.map((player, index) => {
+      const relativeIndex = (index - selfIndex + seatCount) % seatCount;
+      const angle = Math.PI / 2 - relativeIndex * (Math.PI * 2 / seatCount);
+      return { playerId: player.id, x: 50 + Math.cos(angle) * 44, y: 50 + Math.sin(angle) * 44 };
+    });
   }
 
   private targetTable(view: MatchSnapshot, self: PublicPlayerView, attacker: PublicPlayerView): string {
-    const selfIndex = view.players.findIndex((player) => player.id === view.selfPlayerId);
-    const seatCount = view.players.length;
     const livingCount = view.players.filter((player) => !player.eliminated).length;
-    const choosing = self.id === attacker.id && !self.eliminated;
+    const defender = view.defenderId ? view.players.find((player) => player.id === view.defenderId) ?? null : null;
+    const introActive = defender !== null;
+    const choosing = !introActive && self.id === attacker.id && !self.eliminated;
+    const positions = this.pokerPositions(view);
     const seats = view.players.map((player, index) => {
       const isAttacker = player.id === view.attackerId;
+      const isDefender = player.id === view.defenderId;
       const isTarget = choosing && !player.eliminated && !isAttacker;
-      const relativeIndex = (index - selfIndex + seatCount) % seatCount;
-      const angle = Math.PI / 2 - relativeIndex * (Math.PI * 2 / seatCount);
-      const x = 50 + Math.cos(angle) * 44;
-      const y = 50 + Math.sin(angle) * 44;
+      const { x, y } = positions[index]!;
       const stateLabel = player.eliminated
         ? "OUT"
         : isAttacker
-          ? "CHOOSING"
+          ? introActive ? "ATTACKER" : ""
+          : isDefender
+            ? "DEFENDER"
           : isTarget
-            ? "CLICK TO CHALLENGE"
+            ? ""
             : player.connected
               ? "WAITING"
               : "RECONNECTING";
       const tag = isTarget ? "button" : "article";
       return `
-        <${tag} ${isTarget ? `type="button" data-target-player="${player.id}"` : ""} class="poker-seat ${player.eliminated ? "eliminated" : ""} ${isAttacker ? "attacker choosing" : ""} ${isTarget ? "targetable" : ""}" style="--seat-x:${x.toFixed(2)}%;--seat-y:${y.toFixed(2)}%">
+        <${tag} ${isTarget ? `type="button" data-target-player="${player.id}"` : ""} class="poker-seat ${player.eliminated ? "eliminated" : ""} ${isAttacker ? "attacker" : ""} ${isAttacker && !introActive ? "choosing" : ""} ${isDefender ? "defender" : ""} ${isTarget ? "targetable" : ""}" style="--seat-x:${x.toFixed(2)}%;--seat-y:${y.toFixed(2)}%">
           <span class="seat-number">${player.seatIndex + 1}</span>
           <div class="poker-seat-copy">
-            <span class="poker-name-line"><strong>${escapeHtml(player.name)}${player.id === view.selfPlayerId ? " · YOU" : ""}</strong>${this.cardCountDisplay(player.handCount, "stack")}</span>
-            <small>${stateLabel}</small>
+            <span class="poker-name-line"><strong>${escapeHtml(player.name)}${player.id === view.selfPlayerId ? " · YOU" : ""}</strong><span class="poker-card-source" data-card-source-player="${player.id}">${this.cardCountDisplay(player.handCount, "stack")}</span></span>
+            ${stateLabel ? `<small>${stateLabel}</small>` : ""}
           </div>
           <b>&hearts; ${player.hp}</b>
         </${tag}>`;
     }).join("");
+    const attackerPosition = positions.find((position) => position.playerId === attacker.id)!;
+    const defenderPosition = defender ? positions.find((position) => position.playerId === defender.id)! : null;
+    const introElapsed = introActive && view.deadlineAt !== null
+      ? Math.min(Math.max(2_000 - (view.deadlineAt - view.serverNow), 0), 2_000)
+      : 0;
+    const punch = defender && defenderPosition ? `
+      <div class="versus-punch" aria-label="${escapeHtml(attacker.name)} challenges ${escapeHtml(defender.name)}"
+        style="--from-x:${attackerPosition.x.toFixed(2)}%;--from-y:${attackerPosition.y.toFixed(2)}%;--to-x:${defenderPosition.x.toFixed(2)}%;--to-y:${defenderPosition.y.toFixed(2)}%;--intro-delay:-${introElapsed}ms">
+        <span>VS</span><i></i>
+      </div>` : "";
     return `
       <section class="poker-roster targeting-roster" aria-label="Choose an opponent from the poker table">
-        <div class="poker-felt targeting-felt ${choosing ? "choosing-active" : "waiting-choice"}">
+        <div class="poker-felt targeting-felt ${introActive ? "duel-intro" : choosing ? "choosing-active" : "waiting-choice"}">
           <div class="poker-center target-table-copy">
             <small>SEAT ${attacker.seatIndex + 1} · ${livingCount} PLAYERS LEFT</small>
-            <h2>${choosing ? "Choose opponent" : `${escapeHtml(attacker.name)} is choosing`}</h2>
-            <p>${choosing ? "Click any living opponent at the table." : "Waiting for the highlighted player."}</p>
-            <span class="choosing-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <h2>${introActive ? `${escapeHtml(attacker.name)} vs ${escapeHtml(defender!.name)}` : choosing ? "Choose opponent" : `${escapeHtml(attacker.name)} is choosing`}</h2>
+            <p>${introActive ? "Challenge locked. Prepare for the first pair." : choosing ? "Click any living opponent at the table." : "Waiting for the highlighted player."}</p>
+            ${introActive ? "" : '<span class="choosing-dots" aria-hidden="true"><i></i><i></i><i></i></span>'}
           </div>
           ${seats}
+          ${punch}
         </div>
         ${self.eliminated ? '<p class="spectator-note">You are eliminated, but you can watch the match to the end.</p>' : ""}
       </section>`;
+  }
+
+  private finalTable(view: MatchSnapshot): string {
+    const outcome = view.outcome!;
+    const positions = this.pokerPositions(view);
+    const sequenceKey = this.outcomeKey(view);
+    const sequenceElapsed = this.activeOutcomeSequence?.key === sequenceKey
+      ? performance.now() - this.activeOutcomeSequence.startedAt
+      : 0;
+    const crownedIds = outcome.kind === "winner" && outcome.winnerId
+      ? [outcome.winnerId]
+      : view.battle
+        ? [...view.battle.duelistIds]
+        : view.players.slice(-2).map((player) => player.id);
+    const crownDelay = this.outcomeCrownDelay(view) - sequenceElapsed;
+    const seats = view.players.map((player, index) => {
+      const { x, y } = positions[index]!;
+      const crowned = crownedIds.includes(player.id);
+      const label = crowned
+        ? outcome.kind === "draw" ? "DRAW" : "WINNER"
+        : player.eliminated ? "OUT" : "FINALIST";
+      return `
+        <article class="poker-seat outcome-seat ${crowned ? "crowned-seat" : ""}" style="--seat-x:${x.toFixed(2)}%;--seat-y:${y.toFixed(2)}%;--crown-delay:${crownDelay}ms">
+          <span class="seat-number">${player.seatIndex + 1}</span>
+          <div class="poker-seat-copy">
+            <span class="poker-name-line"><strong>${escapeHtml(player.name)}${player.id === view.selfPlayerId ? " · YOU" : ""}</strong><span class="poker-card-source" data-card-source-player="${player.id}">${this.cardCountDisplay(player.handCount, "stack")}</span></span>
+            <small>${label}</small>
+          </div>
+          <b>&hearts; ${player.hp}</b>
+        </article>`;
+    }).join("");
+    const crowns = crownedIds.map((playerId) => {
+      const position = positions.find((item) => item.playerId === playerId);
+      if (!position) return "";
+      const name = view.players.find((player) => player.id === playerId)?.name ?? "winner";
+      return `
+        <span class="winner-crown" aria-label="Crown for ${escapeHtml(name)}" style="--crown-x:${position.x.toFixed(2)}%;--crown-y:${position.y.toFixed(2)}%;--crown-rest:${position.y < 18 ? 30 : -42}px;--crown-delay:${crownDelay}ms">
+          <svg viewBox="0 0 96 72" aria-hidden="true"><path d="M10 21 31 42 48 11 65 42 86 21 78 61H18Z"/><path class="crown-band" d="M18 53h60v13H18Z"/><circle cx="10" cy="19" r="5"/><circle cx="48" cy="9" r="5"/><circle cx="86" cy="19" r="5"/></svg>
+        </span>`;
+    }).join("");
+    const centerTitle = outcome.reason === "showdown"
+      ? outcome.kind === "draw" ? "Five meet five" : "Five of a kind"
+      : outcome.kind === "draw" ? "Final draw" : "A champion remains";
+    return `
+      <section class="poker-roster outcome-roster" aria-label="Final table">
+        <div class="poker-felt outcome-felt">
+          <div class="poker-center outcome-table-copy">
+            <small>MATCH COMPLETE</small>
+            <h2>${centerTitle}</h2>
+          </div>
+          ${seats}
+          ${this.showdownCards(view, positions, sequenceElapsed)}
+          ${crowns}
+        </div>
+      </section>`;
+  }
+
+  private showdownCards(view: MatchSnapshot, positions: PokerPosition[], sequenceElapsed: number): string {
+    if (view.outcome?.reason !== "showdown" || !view.outcome.showdownSymbols || !view.battle) return "";
+    const entries = view.outcome.showdownSymbols.flatMap((symbol, index) => {
+      const playerId = view.battle!.duelistIds[index];
+      return symbol ? [{ playerId, symbol }] : [];
+    });
+    const ordered = view.outcome.kind === "winner" && entries.length === 2
+      ? [...entries].sort((entry) => entry.playerId === view.outcome!.winnerId ? 1 : -1)
+      : entries;
+    return ordered.map((entry, batchIndex) => {
+      const origin = positions.find((position) => position.playerId === entry.playerId);
+      if (!origin) return "";
+      const isWinner = entry.playerId === view.outcome!.winnerId;
+      const batchDelay = view.outcome!.kind === "winner" && ordered.length === 2
+        ? batchIndex * 1_550
+        : 0;
+      const rowY = view.outcome!.kind === "draw" && ordered.length === 2
+        ? batchIndex === 0 ? 43 : 59
+        : 52;
+      return Array.from({ length: 5 }, (_, cardIndex) => {
+        const targetX = 50 + (cardIndex - 2) * 15.5;
+        const delay = 120 + batchDelay + cardIndex * 130 - sequenceElapsed;
+        return `
+          <span class="showdown-card face ${entry.symbol} ${isWinner ? "showdown-winner" : "showdown-challenger"}" data-showdown-player="${entry.playerId}" style="--card-from-x:${origin.x.toFixed(2)}%;--card-from-y:${origin.y.toFixed(2)}%;--card-to-x:${targetX.toFixed(2)}%;--card-to-y:${rowY}%;--showdown-delay:${delay}ms;--showdown-layer:${isWinner ? 9 : 7}">
+            ${cardFace(entry.symbol, true)}
+          </span>`;
+      }).join("");
+    }).join("");
   }
 
   private cardCountDisplay(count: number, mode: "stack" | "individual"): string {
@@ -384,7 +661,7 @@ class RpsClient {
     const role = player.id === view.attackerId ? "ATTACKER" : "DEFENDER";
     const cardsLeft = Math.max(player.handCount - player.slots.filter((slot) => slot.occupied).length, 0);
     return `
-      <section class="duelist-box ${side}-duelist" aria-label="${side} duelist ${escapeHtml(player.name)}">
+      <section class="duelist-box ${side}-duelist" aria-label="${side} duelist ${escapeHtml(player.name)}" data-duelist-total-player="${player.id}">
         <span class="duelist-role">${side.toUpperCase()} · ${role}</span>
         <strong>${escapeHtml(player.name)}${player.isBot ? player.botDifficulty === "advanced" ? " // GTO" : player.botDifficulty === "learned" ? " // RL" : " // CPU" : ""}</strong>
         ${this.cardCountDisplay(cardsLeft, "individual")}
@@ -474,10 +751,7 @@ class RpsClient {
       <section class="battle-grid ${sequencePending ? "battle-sequence cards-pre-revealed" : ""}">${lanes}</section>
       ${this.duelistBox(view, bottom, displayBottomHp, "bottom")}
       <section class="player-console">
-        <div class="self-summary">
-          <span><small>${selfIsDuelist ? "YOUR HP" : `${escapeHtml(bottom.name)} HP`}</small><strong data-total-player="${bottom.id}">♥ ${displayBottomHp}</strong></span>
-          ${selfIsDuelist ? `<span class="unassigned ${view.phase === "preparation" && view.activeLane === 2 && !self.slots[2].occupied ? "danger" : "safe"}"><small>HP LEFT</small><strong>♥ ${unassigned}</strong></span>` : '<span><small>YOU ARE WATCHING</small><strong class="spectating-label">SPECTATOR</strong></span>'}
-        </div>
+        ${selfIsDuelist && view.phase === "preparation" ? `<div class="self-summary"><span class="unassigned ${view.activeLane === 2 && !self.slots[2].occupied ? "danger" : "safe"}"><small>HP LEFT</small><strong>♥ ${unassigned}</strong></span></div>` : !selfIsDuelist ? '<div class="self-summary"><span><small>YOU ARE WATCHING</small><strong class="spectating-label">SPECTATOR</strong></span></div>' : ""}
         <div class="hand-row">${view.self.hand.map((card) => this.handCard(card, self, view)).join("")}</div>
         ${view.phase === "preparation" && selfIsDuelist ? `
           <div class="phase-actions">
@@ -486,10 +760,10 @@ class RpsClient {
               : view.activeLane < 2
                 ? self.slots[view.activeLane].occupied
                   ? `${unassigned} HP remains available for later pairs.`
-                  : "Locking empty concedes this pair. On timeout, your leftmost card is used."
+                  : "Lock now to commit your leftmost card with 0 HP."
                 : self.slots[2].occupied
                   ? `The final card automatically carries all ${self.slots[2].hearts} remaining HP.`
-                  : `On timeout, your leftmost card receives all ${unassigned} remaining HP.`}</p>
+                  : `Lock now to commit your leftmost card with 0 HP and lose ${unassigned} unassigned HP.`}</p>
             <button class="primary lock-button" data-action="lock" ${self.locked ? "disabled" : ""}>${self.locked ? "LOCKED" : `LOCK PAIR ${view.activeLane + 1}`}</button>
           </div>
         ` : view.phase === "preparation" ? `<p class="reveal-message">${escapeHtml(bottom.name)} and ${escapeHtml(opponent.name)} are committing pair ${view.activeLane + 1}.</p>` : view.phase === "battle" || sequencePending || view.phase === "finished" ? '<p class="reveal-message">Cards revealed. Resolving lanes, then collecting every card\'s hearts…</p>' : ""}
@@ -612,7 +886,6 @@ class RpsClient {
   private bindMatch(
     view: MatchSnapshot,
     self: PublicPlayerView,
-    unassigned: number,
     selfIsDuelist: boolean
   ): void {
     app.querySelectorAll<HTMLElement>("[data-target-player]").forEach((button) => {
@@ -627,7 +900,10 @@ class RpsClient {
             ? view.self.discardSelection.filter((id) => id !== cardId)
             : [...view.self.discardSelection, cardId];
           if (next.length <= view.self.requiredDiscards) {
-            if (!alreadySelected) this.animateDiscardToDeck(element);
+            if (!alreadySelected) {
+              gameAudio.playDiscard();
+              this.animateDiscardToDeck(element);
+            }
             this.socket.emit("match:discard", { cardIds: next });
           }
           return;
@@ -648,7 +924,10 @@ class RpsClient {
         event.preventDefault();
         if (Number(element.dataset.dropSlot) !== view.activeLane) return;
         const cardId = event.dataTransfer?.getData("text/card-id");
-        if (cardId) this.socket.emit("match:place", { slotIndex: Number(element.dataset.dropSlot), cardId });
+        if (cardId) {
+          gameAudio.playCardPlace();
+          this.socket.emit("match:place", { slotIndex: Number(element.dataset.dropSlot), cardId });
+        }
       });
       element.addEventListener("click", (event) => {
         if ((event.target as HTMLElement).closest("button")) return;
@@ -663,6 +942,7 @@ class RpsClient {
             slotIndex: Number(element.dataset.dropSlot),
             cardId: this.selectedCardId
           });
+          gameAudio.playCardPlace();
           this.selectedCardId = null;
         }
       });
@@ -684,13 +964,7 @@ class RpsClient {
     });
     app.querySelectorAll<HTMLElement>("[data-action='lock']").forEach((button) => {
       button.addEventListener("click", () => {
-        if (view.phase === "preparation" && !self.slots[view.activeLane].occupied) {
-          const warning = view.activeLane === 2
-            ? `The final pair will be empty and all ${unassigned} remaining HP will be lost. Continue?`
-            : "This pair will be empty and count as a loss. Remaining HP will carry forward. Continue?";
-          const accepted = window.confirm(warning);
-          if (!accepted) return;
-        }
+        gameAudio.playLock();
         this.socket.emit("match:lock");
       });
     });
@@ -735,6 +1009,7 @@ class RpsClient {
     this.snapshot = null;
     this.selectedCardId = null;
     this.clearBattleTimers();
+    this.clearOutcomeTimer();
     this.clearDrawTimers();
     this.renderLanding();
   }
@@ -742,8 +1017,14 @@ class RpsClient {
   private updateClock(): void {
     const element = document.querySelector<HTMLElement>("#phase-clock");
     if (!element || this.snapshot?.kind !== "match") return;
+    if (this.snapshot.phase === "finished") {
+      element.textContent = "";
+      element.classList.remove("urgent");
+      return;
+    }
     if (this.snapshot.deadlineAt === null) {
-      element.textContent = "—";
+      element.textContent = "NO LIMIT";
+      element.classList.remove("urgent");
       return;
     }
     const remaining = Math.max(0, this.snapshot.deadlineAt - (Date.now() + this.serverOffset));
@@ -753,6 +1034,58 @@ class RpsClient {
 
   private battleKey(view: MatchSnapshot): string | null {
     return view.battle ? `${view.roomCode}:${view.battle.round}` : null;
+  }
+
+  private outcomeKey(view: MatchSnapshot): string {
+    const outcome = view.outcome;
+    return `${view.roomCode}:${view.round}:outcome:${outcome?.kind ?? "none"}:${outcome?.winnerId ?? "none"}:${outcome?.reason ?? "none"}`;
+  }
+
+  private outcomeCrownDelay(view: MatchSnapshot): number {
+    if (view.outcome?.reason !== "showdown") return 260;
+    const shownHands = view.outcome.showdownSymbols?.filter((symbol) => symbol !== null).length ?? 0;
+    return view.outcome.kind === "winner" && shownHands === 2 ? 3_250 : 1_750;
+  }
+
+  private startOutcomeSequence(
+    view: MatchSnapshot,
+    self: PublicPlayerView,
+    battleSequencePending: boolean
+  ): void {
+    if (view.phase !== "finished" || !view.outcome || battleSequencePending) return;
+    this.positionShowdownOrigins();
+    const key = this.outcomeKey(view);
+    if (this.completedOutcomeSequences.has(key) || this.activeOutcomeSequence?.key === key) return;
+    this.clearOutcomeTimer();
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const duration = reducedMotion ? 350 : this.outcomeCrownDelay(view) + 1_450;
+    const startedAt = performance.now();
+    const timer = window.setTimeout(() => {
+      this.completedOutcomeSequences.add(key);
+      this.activeOutcomeSequence = null;
+      gameAudio.playOutcome(
+        view.outcome!.kind === "draw" ? "draw" : view.outcome!.winnerId === self.id ? "win" : "loss"
+      );
+      if (this.snapshot?.kind === "match" && this.outcomeKey(this.snapshot) === key) this.render();
+    }, duration);
+    this.activeOutcomeSequence = { key, startedAt, timer };
+  }
+
+  private positionShowdownOrigins(): void {
+    const felt = app.querySelector<HTMLElement>(".outcome-felt");
+    if (!felt) return;
+    const feltRect = felt.getBoundingClientRect();
+    if (feltRect.width === 0 || feltRect.height === 0) return;
+    const sources = [...app.querySelectorAll<HTMLElement>("[data-card-source-player]")];
+    app.querySelectorAll<HTMLElement>("[data-showdown-player]").forEach((card) => {
+      const source = sources.find((candidate) => candidate.dataset.cardSourcePlayer === card.dataset.showdownPlayer);
+      if (!source) return;
+      const sourceRect = source.getBoundingClientRect();
+      const x = (sourceRect.left + sourceRect.width / 2 - feltRect.left) / feltRect.width * 100;
+      const y = (sourceRect.top + sourceRect.height / 2 - feltRect.top) / feltRect.height * 100;
+      card.style.setProperty("--card-from-x", `${x.toFixed(2)}%`);
+      card.style.setProperty("--card-from-y", `${y.toFixed(2)}%`);
+    });
   }
 
   private drawCardKey(view: MatchSnapshot, cardId: string): string {
@@ -771,6 +1104,7 @@ class RpsClient {
     this.revealedPairs.add(key);
     app.querySelector<HTMLElement>(`.battle-lane[data-slot="${revealedIndex}"]`)
       ?.classList.add("pair-just-revealed");
+    if (view.phase === "preparation") gameAudio.playReveal();
   }
 
   private startDrawSequence(view: MatchSnapshot): void {
@@ -813,6 +1147,7 @@ class RpsClient {
       flight.style.setProperty("--draw-mid-y", `${deltaY / 2 - 38}px`);
       flight.style.animationDelay = `${delay}ms`;
       document.body.append(flight);
+      gameAudio.playDraw(delay);
       flight.addEventListener("animationend", () => flight.remove(), { once: true });
 
       const timer = window.setTimeout(() => {
@@ -954,19 +1289,22 @@ class RpsClient {
 
   private revealLane(index: number): void {
     app.querySelector<HTMLElement>(`.battle-lane[data-slot="${index}"]`)?.classList.add("lane-revealing");
+    gameAudio.playReveal();
   }
 
   private clashLane(view: MatchSnapshot, index: number, key: string): void {
     const laneElement = app.querySelector<HTMLElement>(`.battle-lane[data-slot="${index}"]`);
     const lane = view.battle?.lanes[index];
     const selfSide = lane?.sides.find((side) => side.playerId === this.bottomDuelistId(view));
-    if (!laneElement || !selfSide) return;
+    if (!laneElement || !lane || !selfSide) return;
     laneElement.classList.add("lane-clashing");
     laneElement.querySelector<HTMLElement>(".versus-line b")!.textContent = "CLASH";
     const moment = `${key}:clash:${index}`;
     if (!this.firedBattleMoments.has(moment)) {
       this.firedBattleMoments.add(moment);
       effects.events.emit("lane-clash-fx", { laneIndex: index, outcome: selfSide.result });
+      const symbols = lane.sides.map((side) => side.symbol).filter((symbol): symbol is CardSymbol => symbol !== null);
+      if (symbols.length === 2) gameAudio.playClash(symbols[0]!, symbols[1]!);
     }
   }
 
@@ -1017,7 +1355,7 @@ class RpsClient {
     const message = app.querySelector<HTMLElement>(".reveal-message");
     if (message) message.textContent = "Collecting each card's hearts into total HP…";
     for (const playerId of view.battle?.duelistIds ?? []) {
-      const total = app.querySelector<HTMLElement>(`[data-total-player="${playerId}"]`);
+      const total = app.querySelector<HTMLElement>(`[data-duelist-total-player="${playerId}"] .duelist-hp`);
       if (!total) continue;
       total.textContent = "♥ 0";
       total.classList.add("hp-collecting");
@@ -1039,7 +1377,7 @@ class RpsClient {
       const source = laneElement.querySelector<HTMLElement>(
         `[data-lane-heart="${isSelf ? "self" : "opponent"}"]`
       );
-      const target = app.querySelector<HTMLElement>(`[data-total-player="${side.playerId}"]`);
+      const target = app.querySelector<HTMLElement>(`[data-duelist-total-player="${side.playerId}"] .duelist-hp`);
       if (!source || !target) continue;
       source.classList.add("hearts-departing");
       if (animate && side.receivedHp > 0) {
@@ -1069,7 +1407,7 @@ class RpsClient {
       const collected = view.battle.lanes.slice(0, index + 1).reduce((total, currentLane) => {
         return total + (currentLane.sides.find((candidate) => candidate.playerId === side.playerId)?.receivedHp ?? 0);
       }, 0);
-      const target = app.querySelector<HTMLElement>(`[data-total-player="${side.playerId}"]`);
+      const target = app.querySelector<HTMLElement>(`[data-duelist-total-player="${side.playerId}"] .duelist-hp`);
       if (!target) continue;
       target.textContent = `♥ ${collected}`;
       target.classList.remove("hp-receiving");
@@ -1096,6 +1434,8 @@ class RpsClient {
     bundle.style.setProperty("--collect-mid-x", `${deltaX / 2 + (towardSelf ? 22 : -22)}px`);
     bundle.style.setProperty("--collect-mid-y", `${deltaY / 2 - 28}px`);
     document.body.append(bundle);
+    gameAudio.playHeartTing(0, amount);
+    gameAudio.playHeartTing(760, amount + 1);
     bundle.addEventListener("animationend", () => bundle.remove(), { once: true });
   }
 
@@ -1123,6 +1463,7 @@ class RpsClient {
       );
       heart.style.animationDelay = `${index * 55}ms`;
       document.body.append(heart);
+      gameAudio.playHeartTing(index * 55, index);
       heart.addEventListener("animationend", () => heart.remove(), { once: true });
     }
 
@@ -1151,6 +1492,12 @@ class RpsClient {
     if (!this.activeBattleSequence) return;
     for (const timer of this.activeBattleSequence.timers) window.clearTimeout(timer);
     this.activeBattleSequence = null;
+  }
+
+  private clearOutcomeTimer(): void {
+    if (!this.activeOutcomeSequence) return;
+    window.clearTimeout(this.activeOutcomeSequence.timer);
+    this.activeOutcomeSequence = null;
   }
 
   private clearDrawTimers(): void {

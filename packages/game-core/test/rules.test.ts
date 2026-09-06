@@ -6,6 +6,7 @@ import {
   assertMatchInvariants,
   autoCompleteDiscards,
   autoCompletePreparationPair,
+  beginPreparation,
   compareSymbols,
   countAllCards,
   createMatch,
@@ -41,6 +42,7 @@ function player(state: MatchState, id: string): PlayerState {
 
 function startDuel(state: MatchState, defenderId = "p1"): void {
   selectOpponent(state, state.attackerId, defenderId, NOW + 1);
+  beginPreparation(state, NOW + 1 + state.config.duelIntroMs);
 }
 
 function giveSymbols(
@@ -109,6 +111,8 @@ describe("RPS rules", () => {
     expect(state.attackerId).toBe("p0");
     expect(state.defenderId).toBeNull();
     expect(state.config.copiesPerSymbol).toBe(seats + 4);
+    expect(state.config.duelIntroMs).toBe(2_000);
+    expect(state.config.battleRevealMs).toBe(13_000);
     expect(countAllCards(state)).toBe((seats + 4) * 3);
     const allCards = [...state.deck, ...state.players.flatMap((candidate) => candidate.hand)];
     expect(["rock", "paper", "scissors"].map((symbol) =>
@@ -124,8 +128,13 @@ describe("RPS rules", () => {
     expect(() => selectOpponent(state, "p0", "p0", NOW)).toThrow("different living opponent");
 
     selectOpponent(state, "p0", "p3", NOW);
-    expect(state.phase).toBe("preparation");
+    expect(state.phase).toBe("targeting");
     expect(state.defenderId).toBe("p3");
+    expect(state.deadlineAt).toBe(NOW + state.config.duelIntroMs);
+    expect(() => selectOpponent(state, "p0", "p2", NOW)).toThrow("already been selected");
+    expect(() => setCardPlacement(state, "p0", 0, player(state, "p0").hand[0]!.id)).toThrow("preparation phase");
+    beginPreparation(state, state.deadlineAt!);
+    expect(state.phase).toBe("preparation");
   });
 
   it("makes both the card and every committed heart irreversible", () => {
@@ -178,6 +187,22 @@ describe("RPS rules", () => {
     autoCompletePreparationPair(state);
     expect(first.slots[2]).toEqual({ cardId: firstOrder[1], hearts: 7 });
     expect(second.slots[2]).toEqual({ cardId: secondOrder[2], hearts: 10 });
+  });
+
+  it("commits the leftmost available card when a player locks an empty pair", () => {
+    const state = makeMatch();
+    startDuel(state);
+    const duelists = [player(state, "p0"), player(state, "p1")];
+    const originalOrders = duelists.map((duelist) => duelist.hand.map((card) => card.id));
+
+    for (let lane = 0; lane < 3; lane += 1) {
+      for (const duelist of duelists) lockPlayer(state, duelist.id);
+      for (let playerIndex = 0; playerIndex < duelists.length; playerIndex += 1) {
+        expect(duelists[playerIndex]!.slots[lane]!.cardId).toBe(originalOrders[playerIndex]![lane]);
+        expect(duelists[playerIndex]!.slots[lane]!.hearts).toBe(0);
+      }
+      advancePreparationPair(state, 2_000 + lane, seededRandom(lane));
+    }
   });
 
   it("transfers losing stakes minus one and returns each winner's own stake", () => {

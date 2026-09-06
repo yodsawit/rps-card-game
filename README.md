@@ -4,6 +4,12 @@ A 2–6 player Rock-Paper-Scissors card game with public HP wagers, sequential
 face-down pair choices and reveals, optional HP-paid draws, hand growth,
 triples, and five-of-a-kind showdowns. Players attack clockwise and may choose
 any living opponent; computer seats can be added from the room lobby.
+The host chooses a 20-second, 30-second, or unlimited timer shared by target
+selection, each card/HP pair, and discarding. Every selected matchup has a
+server-synchronized two-second table intro before preparation begins.
+Locking any empty pair automatically commits the leftmost available card with
+0 HP. Explicitly placing the final card, or reaching it by timeout, still puts
+all remaining HP on that final pair.
 
 Hosts can add a basic heuristic bot, the exact advanced GTO bot, or the learned
 PPO bot. Advanced bots

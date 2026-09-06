@@ -77,10 +77,11 @@ export interface BattleSummary {
 
 export interface GameConfig {
   startingHp: number;
-  preparationMs: number;
-  targetSelectionMs: number;
+  preparationMs: number | null;
+  targetSelectionMs: number | null;
+  duelIntroMs: number;
   battleRevealMs: number;
-  discardMs: number;
+  discardMs: number | null;
   reconnectMs: number;
   copiesPerSymbol: number;
   startingHandSize: number;
@@ -91,9 +92,10 @@ export const DEFAULT_GAME_CONFIG: Readonly<GameConfig> = {
   startingHp: 10,
   targetSelectionMs: 20_000,
   preparationMs: 20_000,
-  // The client resolves the three lanes in about 4.35 seconds, then holds the
-  // completed battle for five seconds before the server advances.
-  battleRevealMs: 10_000,
+  duelIntroMs: 2_000,
+  // The client finishes its reveal/collection sequence in about 9.35 seconds,
+  // leaving roughly 3.65 seconds of static results before drawing begins.
+  battleRevealMs: 13_000,
   discardMs: 20_000,
   reconnectMs: 30_000,
   copiesPerSymbol: 6,

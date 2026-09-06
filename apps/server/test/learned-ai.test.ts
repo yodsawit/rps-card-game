@@ -3,6 +3,13 @@ import { seededRandom } from "@rps/game-core";
 import { inferLearnedPolicy } from "../src/learned-ai.js";
 import { RoomManager } from "../src/room-manager.js";
 
+function finishDuelIntro(manager: RoomManager, roomCode: string): void {
+  const game = manager.rooms.get(roomCode)!.game!;
+  expect(game.phase).toBe("targeting");
+  expect(game.defenderId).not.toBeNull();
+  manager.tick(game.deadlineAt!);
+}
+
 describe("deployed learned policy", () => {
   it("matches the selected PyTorch checkpoint on a fixed observation", () => {
     const logits = inferLearnedPolicy(Array.from({ length: 90 }, () => 0));
@@ -30,6 +37,7 @@ describe("deployed learned policy", () => {
     expect(bot.botDifficulty).toBe("learned");
 
     manager.startRoom(receipt.roomCode, receipt.playerId, 1_002);
+    finishDuelIntro(manager, receipt.roomCode);
     const gameBot = room.game!.players.find((player) => player.id === bot.id)!;
     expect(gameBot.slots[0].cardId).not.toBeNull();
     expect(gameBot.locked).toBe(true);
@@ -47,8 +55,9 @@ describe("deployed learned policy", () => {
     room.players[0]!.socketId = null;
     manager.startRoom(receipt.roomCode, receipt.playerId, 1_010);
 
-    for (let guard = 0; room.game!.phase !== "finished" && guard < 20; guard += 1) {
-      expect(room.game!.phase).toBe("battle");
+    for (let guard = 0; room.game!.phase !== "finished" && guard < 40; guard += 1) {
+      expect(["targeting", "battle"]).toContain(room.game!.phase);
+      if (room.game!.phase === "targeting") expect(room.game!.defenderId).not.toBeNull();
       manager.tick(room.game!.deadlineAt!);
     }
     expect(room.game!.round).toBeGreaterThan(1);

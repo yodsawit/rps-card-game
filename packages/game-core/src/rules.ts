@@ -22,6 +22,10 @@ import {
   type ThreeSlots
 } from "./types.js";
 
+function deadlineAfter(now: number, durationMs: number | null): number | null {
+  return durationMs === null ? null : now + durationMs;
+}
+
 const EMPTY_SLOTS = (): ThreeSlots => [
   { cardId: null, hearts: 0 },
   { cardId: null, hearts: 0 },
@@ -125,7 +129,7 @@ export function createMatch(
     round: 1,
     preparationLane: 0,
     phase: "targeting",
-    deadlineAt: now + config.targetSelectionMs,
+    deadlineAt: deadlineAfter(now, config.targetSelectionMs),
     deck: shuffle(createDeck(config), random),
     players,
     attackerId: players[0]!.id,
@@ -165,6 +169,7 @@ export function selectOpponent(
   if (state.phase !== "targeting") {
     throw new RuleError("An opponent can only be selected at the start of a turn.");
   }
+  if (state.defenderId !== null) throw new RuleError("An opponent has already been selected.");
   if (playerId !== state.attackerId) throw new RuleError("Only the active attacker can select an opponent.");
   const attacker = playerById(state, playerId);
   const defender = playerById(state, opponentId);
@@ -176,9 +181,16 @@ export function selectOpponent(
   for (const player of state.players) resetTurnState(player);
   state.defenderId = defender.id;
   state.preparationLane = 0;
-  state.phase = "preparation";
-  state.deadlineAt = now + state.config.preparationMs;
+  state.deadlineAt = now + state.config.duelIntroMs;
   state.battle = null;
+}
+
+export function beginPreparation(state: MatchState, now: number): void {
+  if (state.phase !== "targeting" || state.defenderId === null) {
+    throw new RuleError("Preparation can only begin after an opponent is selected.");
+  }
+  state.phase = "preparation";
+  state.deadlineAt = deadlineAfter(now, state.config.preparationMs);
 }
 
 export function setCardPlacement(
@@ -260,6 +272,19 @@ export function lockPlayer(state: MatchState, playerId: PlayerId): void {
   if (!isDuelist(state, playerId)) throw new RuleError("Only an active duelist can lock.");
   const player = playerById(state, playerId);
   if (player.locked) return;
+  if (state.phase === "preparation") {
+    const slot = player.slots[state.preparationLane];
+    if (slot.cardId === null) {
+      const leftmost = player.hand.find((card) =>
+        !player.slots.some((candidate) => candidate.cardId === card.id)
+      );
+      if (!leftmost) throw new RuleError("No card is available for automatic placement.");
+      // A deliberate empty lock always stakes 0 HP, including on the final
+      // pair. Explicit placement and timeout completion keep their existing
+      // final-pair rule and commit every remaining heart.
+      slot.cardId = leftmost.id;
+    }
+  }
   if (state.phase === "discard" && player.discardSelection.length !== player.requiredDiscards) {
     throw new RuleError("Select every required discard before locking.");
   }
@@ -282,10 +307,7 @@ export function autoCompletePreparationPair(state: MatchState): void {
       !player.slots.some((candidate) => candidate.cardId === card.id)
     );
     if (!leftmost) continue;
-    slot.cardId = leftmost.id;
-    if (state.preparationLane === 2) {
-      slot.hearts = player.hp - player.slots[0].hearts - player.slots[1].hearts;
-    }
+    setCardPlacement(state, player.id, state.preparationLane, leftmost.id);
   }
 }
 
@@ -304,7 +326,7 @@ export function advancePreparationPair(
   }
   if (state.preparationLane < 2) {
     state.preparationLane = (state.preparationLane + 1) as PreparationLane;
-    state.deadlineAt = now + state.config.preparationMs;
+    state.deadlineAt = deadlineAfter(now, state.config.preparationMs);
     for (const player of activeDuelists(state)) player.locked = false;
     return null;
   }
@@ -386,11 +408,6 @@ export function resolvePreparation(
     throw new RuleError("All three pairs must be prepared before battle resolution.");
   }
   const duelists = activeDuelists(state);
-  for (const player of duelists) {
-    if (player.slots[2].cardId !== null) {
-      player.slots[2].hearts = player.hp - player.slots[0].hearts - player.slots[1].hearts;
-    }
-  }
 
   const triples: [boolean, boolean] = [isTriple(duelists[0]), isTriple(duelists[1])];
   const unassignedLost = duelists.map((player) =>
@@ -470,7 +487,7 @@ function beginNextTurn(state: MatchState, now: number): void {
   state.defenderId = null;
   state.preparationLane = 0;
   state.phase = "targeting";
-  state.deadlineAt = now + state.config.targetSelectionMs;
+  state.deadlineAt = deadlineAfter(now, state.config.targetSelectionMs);
   state.battle = null;
   state.outcome = null;
 }
@@ -509,7 +526,7 @@ export function startDiscardPhase(state: MatchState, now: number): void {
     player.slots = EMPTY_SLOTS();
   }
   state.phase = "discard";
-  state.deadlineAt = now + state.config.discardMs;
+  state.deadlineAt = deadlineAfter(now, state.config.discardMs);
 }
 
 export function advanceBattle(state: MatchState, now: number): void {

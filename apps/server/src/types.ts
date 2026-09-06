@@ -6,6 +6,7 @@ import type {
   PlayedHandMemory,
   PlayerId
 } from "@rps/game-core";
+import type { ActionTimeLimit } from "@rps/protocol";
 
 export interface KnownHandObservation {
   symbols: CardSymbol[];
@@ -35,6 +36,7 @@ export interface RoomPlayer {
 export interface Room {
   code: string;
   hostPlayerId: PlayerId;
+  actionTimeMs: ActionTimeLimit;
   players: RoomPlayer[];
   game: MatchState | null;
   knownHands: Map<PlayerId, KnownHandObservation>;

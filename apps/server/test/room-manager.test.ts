@@ -4,6 +4,13 @@ import { RoomManager } from "../src/room-manager.js";
 import { snapshotFor } from "../src/snapshots.js";
 import type { GameStudyEvent } from "../src/study-log.js";
 
+function finishDuelIntro(manager: RoomManager, roomCode: string): void {
+  const game = manager.rooms.get(roomCode)!.game!;
+  expect(game.phase).toBe("targeting");
+  expect(game.defenderId).not.toBeNull();
+  manager.tick(game.deadlineAt!);
+}
+
 describe("RoomManager", () => {
   it("creates a lobby where the host can manage up to six seats and start", () => {
     const manager = new RoomManager(seededRandom(44));
@@ -15,6 +22,7 @@ describe("RoomManager", () => {
     if (lobby.kind !== "lobby") return;
     expect(lobby.hostPlayerId).toBe(receipt.playerId);
     expect(lobby.maximumSeats).toBe(6);
+    expect(lobby.actionTimeMs).toBe(20_000);
     expect(lobby.players).toHaveLength(1);
 
     for (let index = 0; index < 5; index += 1) {
@@ -36,6 +44,30 @@ describe("RoomManager", () => {
     expect(initial.room.game?.phase).toBe("targeting");
   });
 
+  it("lets the host choose a shared action timer, including no limit", () => {
+    const manager = new RoomManager(seededRandom(45));
+    const host = manager.createRoom("Host", "socket-1", 1_000);
+    const guest = manager.joinRoom(host.roomCode, "Guest", "socket-2", 1_010);
+    const room = manager.rooms.get(host.roomCode)!;
+
+    expect(() => manager.setActionTime(room.code, guest.playerId, 30_000, 1_020)).toThrow("Only the room host");
+    manager.setActionTime(room.code, host.playerId, 30_000, 1_025);
+    const timedLobby = snapshotFor(room, room.players[0]!, 1_026);
+    expect(timedLobby.kind === "lobby" && timedLobby.actionTimeMs).toBe(30_000);
+    manager.setActionTime(room.code, host.playerId, null, 1_030);
+    const lobby = snapshotFor(room, room.players[0]!, 1_031);
+    expect(lobby.kind === "lobby" && lobby.actionTimeMs).toBeNull();
+
+    manager.startRoom(room.code, host.playerId, 1_100);
+    expect(room.game!.deadlineAt).toBe(3_100);
+    finishDuelIntro(manager, room.code);
+    expect(room.game!.phase).toBe("preparation");
+    expect(room.game!.deadlineAt).toBeNull();
+    expect(room.game!.config.targetSelectionMs).toBeNull();
+    expect(room.game!.config.preparationMs).toBeNull();
+    expect(room.game!.config.discardMs).toBeNull();
+  });
+
   it("waits in the lobby for human joins and restricts start controls to the host", () => {
     const manager = new RoomManager(seededRandom(8));
     const first = manager.createRoom("One", "socket-1", 1_000);
@@ -46,6 +78,7 @@ describe("RoomManager", () => {
     expect(() => manager.addBot(room.code, second.playerId, 1_200)).toThrow("Only the room host");
     expect(() => manager.startRoom(room.code, second.playerId, 1_200)).toThrow("Only the room host");
     manager.startRoom(room.code, first.playerId, 1_300);
+    finishDuelIntro(manager, room.code);
     expect(room.game?.phase).toBe("preparation");
     expect(room.game?.defenderId).toBe(second.playerId);
     expect(room.game?.players).toHaveLength(2);
@@ -68,6 +101,7 @@ describe("RoomManager", () => {
     expect(lobby.players.find((player) => player.id === advanced.id)?.botDifficulty).toBe("advanced");
 
     manager.startRoom(room.code, receipt.playerId, 1_100);
+    finishDuelIntro(manager, room.code);
     const gameBot = room.game!.players.find((player) => player.id === advanced.id)!;
     expect(gameBot.slots[0].cardId).not.toBeNull();
     expect(gameBot.locked).toBe(true);
@@ -123,6 +157,7 @@ describe("RoomManager", () => {
     const target = room.game!.players.find((player) => player.isBot)!;
 
     manager.selectTarget(room.code, receipt.playerId, target.id, 1_200);
+    finishDuelIntro(manager, room.code);
 
     expect(room.game!.players).toHaveLength(6);
     expect(target.slots[0].cardId).not.toBeNull();
@@ -139,6 +174,7 @@ describe("RoomManager", () => {
     const bot = room.players.find((candidate) => candidate.isBot)!;
 
     manager.selectTarget(room.code, player.id, bot.id, 1_200);
+    finishDuelIntro(manager, room.code);
     const view = snapshotFor(room, player, 1_201);
     expect(view.kind).toBe("match");
     if (view.kind !== "match") return;
@@ -161,6 +197,7 @@ describe("RoomManager", () => {
     const human = game.players.find((candidate) => candidate.id === receipt.playerId)!;
     const bot = game.players.find((candidate) => candidate.isBot)!;
     manager.selectTarget(room.code, human.id, bot.id, 1_200);
+    finishDuelIntro(manager, room.code);
     human.hand = human.hand.map((card) => ({ ...card, symbol: "rock" as const }));
     room.knownHands.set(human.id, {
       symbols: ["rock", "rock", "rock"],
@@ -230,6 +267,7 @@ describe("RoomManager", () => {
     human.hand = human.hand.map((card) => ({ ...card, symbol: "rock" as const }));
     bot.hand = bot.hand.map((card) => ({ ...card, symbol: "rock" as const }));
     manager.selectTarget(room.code, human.id, bot.id, 1_200);
+    finishDuelIntro(manager, room.code);
 
     for (let lane = 0; lane < 3; lane += 1) {
       manager.placeCard(room.code, human.id, lane as 0 | 1 | 2, human.hand[lane]!.id, 1_300 + lane * 10);
@@ -277,6 +315,7 @@ describe("RoomManager", () => {
     manager.startRoom(first.roomCode, first.playerId, 1_100);
     const room = manager.rooms.get(first.roomCode)!;
     manager.selectTarget(room.code, first.playerId, second.playerId, 1_200);
+    finishDuelIntro(manager, room.code);
     const game = room.game!;
     const left = game.players.find((candidate) => candidate.id === first.playerId)!;
     const right = game.players.find((candidate) => candidate.id === second.playerId)!;
@@ -332,6 +371,7 @@ describe("RoomManager", () => {
     expect(game?.players.find((player) => player.id === first.playerId)?.eliminated).toBe(true);
     expect(game?.attackerId).toBe(second.playerId);
     expect(game?.defenderId).toBe(third.playerId);
+    finishDuelIntro(manager, first.roomCode);
     expect(game?.phase).toBe("preparation");
   });
 
@@ -363,6 +403,9 @@ describe("RoomManager", () => {
     const game = manager.rooms.get(first.roomCode)!.game!;
 
     manager.tick(game.deadlineAt!);
+    expect(game.phase).toBe("targeting");
+    expect(game.defenderId).toBe(second.playerId);
+    manager.tick(game.deadlineAt!);
     expect(game.phase).toBe("preparation");
     expect(game.defenderId).toBe(second.playerId);
   });
@@ -378,6 +421,7 @@ describe("RoomManager", () => {
     const leftmost = left.hand[0]!.id;
     const rightmost = right.hand[0]!.id;
 
+    finishDuelIntro(manager, first.roomCode);
     manager.lock(first.roomCode, first.playerId, 1_300);
     manager.tick(game.deadlineAt!);
 

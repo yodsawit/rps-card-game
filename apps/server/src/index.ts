@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import express from "express";
 import { Server } from "socket.io";
 import {
+  cleanActionTimeLimit,
   cleanCardId,
   cleanCardIds,
   cleanBotDifficulty,
@@ -147,6 +148,10 @@ io.on("connection", (socket) => {
 
   socket.on("room:remove-bot", (payload) => action((roomCode, playerId) => {
     rooms.removeBot(roomCode, playerId, cleanCardId(payload.playerId) as string, Date.now());
+  }));
+
+  socket.on("room:set-action-time", (payload) => action((roomCode, playerId) => {
+    rooms.setActionTime(roomCode, playerId, cleanActionTimeLimit(payload?.actionTimeMs), Date.now());
   }));
 
   socket.on("room:start", () => action((roomCode, playerId) => {

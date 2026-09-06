@@ -27,6 +27,8 @@ export interface SessionReceipt {
   token: string;
 }
 
+export type ActionTimeLimit = 20_000 | 30_000 | null;
+
 export interface PublicSlotView {
   occupied: boolean;
   hearts: number;
@@ -88,6 +90,7 @@ export interface LobbySnapshot {
   selfPlayerId: PlayerId;
   hostPlayerId: PlayerId;
   maximumSeats: number;
+  actionTimeMs: ActionTimeLimit;
   players: Array<{
     id: PlayerId;
     seatIndex: number;
@@ -128,6 +131,10 @@ export interface RemoveBotPayload {
 
 export interface AddBotPayload {
   difficulty: BotDifficulty;
+}
+
+export interface SetActionTimePayload {
+  actionTimeMs: ActionTimeLimit;
 }
 
 export interface SelectTargetPayload {
@@ -171,6 +178,7 @@ export interface ClientToServerEvents {
   "room:leave": () => void;
   "room:add-bot": (payload: AddBotPayload) => void;
   "room:remove-bot": (payload: RemoveBotPayload) => void;
+  "room:set-action-time": (payload: SetActionTimePayload) => void;
   "room:start": () => void;
   "room:rematch": () => void;
   "match:target": (payload: SelectTargetPayload) => void;
