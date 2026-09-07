@@ -2,15 +2,14 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   CARD_SYMBOLS,
+  POLICY_SCHEMA,
   type Card,
   type CardSymbol,
   type RandomSource
 } from "@rps/game-core";
 import type { Room } from "./types.js";
 
-const ACTION_SIZE = 63;
-const HEART_LEVELS = 21;
-const MAX_TOTAL_HP = 20;
+const MAX_TOTAL_HP = POLICY_SCHEMA.normalization.hp;
 
 interface PolicyLayers {
   body0Weight: number[][];
@@ -38,9 +37,12 @@ export interface LearnedPairChoice {
 
 const weightsPath = fileURLToPath(new URL("../models/rps_policy.weights.json", import.meta.url));
 const weights = JSON.parse(readFileSync(weightsPath, "utf8")) as PolicyWeights;
+const ACTION_SIZE = weights.actionSize;
+const HEART_LEVELS = ACTION_SIZE / 3;
 
-if (weights.schemaVersion !== 1 || weights.observationSize !== 90 || weights.actionSize !== ACTION_SIZE) {
-  throw new Error("The deployed learned-policy weights do not match observation/action schema 1.");
+if (weights.observationSize !== POLICY_SCHEMA.observationSize
+  || POLICY_SCHEMA.actionSchemas[weights.schemaVersion as 1 | 2] !== ACTION_SIZE) {
+  throw new Error("The deployed learned-policy weights do not match a supported observation/action schema.");
 }
 
 function dense(input: readonly number[], matrix: readonly number[][], bias: readonly number[]): number[] {
@@ -171,65 +173,69 @@ function battleMask(room: Room, playerId: string): boolean[] {
   for (const symbol of CARD_SYMBOLS) {
     if (!player.hand.some((card) => card.symbol === symbol && !committed.has(card.id))) continue;
     const heartValues = game.preparationLane === 2
-      ? [remainingHp]
-      : Array.from({ length: remainingHp + 1 }, (_, hearts) => hearts);
+      ? [Math.min(remainingHp, HEART_LEVELS - 1)]
+      : Array.from({ length: Math.min(remainingHp, HEART_LEVELS - 1) + 1 }, (_, hearts) => hearts);
     for (const hearts of heartValues) mask[symbolIndex(symbol) * HEART_LEVELS + hearts] = true;
   }
   return mask;
 }
 
-export function chooseLearnedPair(
-  room: Room,
-  playerId: string,
-  random: RandomSource
-): LearnedPairChoice {
-  const game = room.game!;
-  const player = game.players.find((candidate) => candidate.id === playerId)!;
-  const selected = selectAction(encodeObservation(room, playerId, "battle"), battleMask(room, playerId), random);
-  const symbol = CARD_SYMBOLS[Math.floor(selected.action / HEART_LEVELS)]!;
-  const committed = new Set(player.slots.map((slot) => slot.cardId).filter((id): id is string => id !== null));
-  const card = player.hand.find((candidate) => candidate.symbol === symbol && !committed.has(candidate.id));
-  if (!card) throw new Error("The learned policy selected an unavailable card symbol.");
-  return {
-    cardId: card.id,
-    hearts: selected.action % HEART_LEVELS,
-    actionProbability: selected.probability,
-    valueEstimate: null
-  };
+export interface LearnedDecisionInput {
+  kind: "pair" | "buy" | "discard";
+  observation: number[];
+  hand: Card[];
+  mask: boolean[];
+  remainingHp: number;
+  finalLane: boolean;
+  requiredDiscards: number;
 }
 
-export function shouldLearnedPurchaseExtraDraw(
-  room: Room,
-  playerId: string,
-  random: RandomSource
-): boolean {
+/** Build the complete policy input before crossing the worker boundary. */
+export function makeLearnedInput(room: Room, playerId: string,
+  kind: LearnedDecisionInput["kind"], requiredDiscards = 0): LearnedDecisionInput {
   const game = room.game!;
   const player = game.players.find((candidate) => candidate.id === playerId)!;
-  const mask = Array.from({ length: ACTION_SIZE }, () => false);
-  mask[0] = true;
-  mask[1] = player.hp > 1 && game.deck.length > 0;
-  return selectAction(encodeObservation(room, playerId, "buy"), mask, random).action === 1;
+  const committed = new Set(player.slots.map((slot) => slot.cardId));
+  const mask = kind === "pair" ? battleMask(room, playerId) : Array.from({ length: ACTION_SIZE }, () => false);
+  if (kind === "buy") { mask[0] = true; mask[1] = player.hp > 1 && game.deck.length > 0; }
+  return { kind, observation: encodeObservation(room, playerId, kind === "pair" ? "battle" : kind),
+    hand: player.hand.filter((card) => kind !== "pair" || !committed.has(card.id)).map((card) => ({ ...card })),
+    mask, remainingHp: player.hp - player.slots.reduce((sum, slot) => sum + slot.hearts, 0),
+    finalLane: game.preparationLane === 2, requiredDiscards };
 }
 
-export function chooseLearnedDiscards(
-  room: Room,
-  playerId: string,
-  requiredDiscards: number,
-  random: RandomSource
-): string[] {
-  const game = room.game!;
-  const player = game.players.find((candidate) => candidate.id === playerId)!;
-  const remaining = [...player.hand];
+export function decideLearned(input: LearnedDecisionInput, random: RandomSource): LearnedPairChoice | boolean | string[] {
+  if (input.kind === "buy") return selectAction(input.observation, input.mask, random).action === 1;
+  if (input.kind === "pair") {
+    const selected = selectAction(input.observation, input.mask, random);
+    const symbol = CARD_SYMBOLS[Math.floor(selected.action / HEART_LEVELS)]!;
+    const card = input.hand.find((candidate) => candidate.symbol === symbol);
+    if (!card) throw new Error("The learned policy selected an unavailable card symbol.");
+    return { cardId: card.id, hearts: input.finalLane ? input.remainingHp : selected.action % HEART_LEVELS,
+      actionProbability: selected.probability, valueEstimate: null };
+  }
+  const remaining = [...input.hand];
   const selectedIds: string[] = [];
-  for (let discardIndex = 0; discardIndex < requiredDiscards; discardIndex += 1) {
+  for (let index = 0; index < input.requiredDiscards; index += 1) {
     const mask = Array.from({ length: ACTION_SIZE }, () => false);
     for (const card of remaining) mask[symbolIndex(card.symbol)] = true;
-    const selected = selectAction(encodeObservation(room, playerId, "discard", remaining), mask, random);
-    const symbol = CARD_SYMBOLS[selected.action]!;
-    const cardIndex = remaining.findIndex((card) => card.symbol === symbol);
+    const observation = [...input.observation];
+    CARD_SYMBOLS.forEach((symbol, index) => { observation[7 + index] = remaining.filter((card) => card.symbol === symbol).length / 8; });
+    const selected = selectAction(observation, mask, random);
+    const cardIndex = remaining.findIndex((card) => card.symbol === CARD_SYMBOLS[selected.action]);
     if (cardIndex < 0) throw new Error("The learned policy selected an unavailable discard symbol.");
     selectedIds.push(remaining[cardIndex]!.id);
     remaining.splice(cardIndex, 1);
   }
   return selectedIds;
+}
+
+export function chooseLearnedPair(room: Room, playerId: string, random: RandomSource): LearnedPairChoice {
+  return decideLearned(makeLearnedInput(room, playerId, "pair"), random) as LearnedPairChoice;
+}
+export function shouldLearnedPurchaseExtraDraw(room: Room, playerId: string, random: RandomSource): boolean {
+  return decideLearned(makeLearnedInput(room, playerId, "buy"), random) as boolean;
+}
+export function chooseLearnedDiscards(room: Room, playerId: string, requiredDiscards: number, random: RandomSource): string[] {
+  return decideLearned(makeLearnedInput(room, playerId, "discard", requiredDiscards), random) as string[];
 }

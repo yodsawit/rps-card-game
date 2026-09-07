@@ -15,9 +15,11 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:ui": "playwright test",
     "start": "npm run start -w @rps/server"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "concurrently": "10.0.5",
     "typescript": "7.0.2",
     "vitest": "4.1.11"

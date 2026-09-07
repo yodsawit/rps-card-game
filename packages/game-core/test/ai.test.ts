@@ -60,6 +60,7 @@ describe("computer opponent", () => {
     expect(distribution).toEqual([{
       counts: { rock: 3, paper: 0, scissors: 0 },
       samples: 100,
+      historyFallbackRate: 0,
       probability: 1
     }]);
     expect(chooseAdvancedTarget({

@@ -1,5 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { createBufferedLogger, type BufferedLogger } from "./buffered-log.js";
 
 export type GameStudyEventType =
   | "match_started"
@@ -26,18 +25,6 @@ export type GameStudyEventHandler = (event: GameStudyEvent) => void;
 export function createJsonlStudyLogger(
   path: string,
   reportError: (message: string) => void = (message) => process.stderr.write(`${message}\n`)
-): GameStudyEventHandler {
-  let warned = false;
-  return (event): void => {
-    try {
-      mkdirSync(dirname(path), { recursive: true });
-      appendFileSync(path, `${JSON.stringify(event)}\n`, "utf8");
-      warned = false;
-    } catch (error) {
-      if (warned) return;
-      warned = true;
-      const message = error instanceof Error ? error.message : "Unknown file error.";
-      reportError(`RPS study log could not be written: ${message}`);
-    }
-  };
+): BufferedLogger<GameStudyEvent> {
+  return createBufferedLogger(path, reportError);
 }

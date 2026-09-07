@@ -34,6 +34,7 @@ export interface RoomPlayer {
 }
 
 export interface Room {
+  revision?: number;
   code: string;
   hostPlayerId: PlayerId;
   actionTimeMs: ActionTimeLimit;

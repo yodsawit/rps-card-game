@@ -23,16 +23,39 @@ import { RoomManager } from "./room-manager.js";
 import { createJsonlServerLogger } from "./server-log.js";
 import { snapshotFor } from "./snapshots.js";
 import { createJsonlStudyLogger } from "./study-log.js";
+import { BotPool } from "./bot-pool.js";
+import { RateLimit } from "./rate-limit.js";
 
 const app = express();
 const httpServer = createServer(app);
+app.disable("x-powered-by");
+app.use((_request, response, next) => {
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("Referrer-Policy", "same-origin");
+  response.setHeader("Content-Security-Policy", "frame-ancestors 'none'");
+  next();
+});
+const connections = new RateLimit(60, 60_000);
+const creations = new RateLimit(8, 60_000);
+const actions = new RateLimit(240, 10_000);
+const allowedOrigins = new Set((process.env.RPS_ALLOWED_ORIGINS ?? "").split(",").filter(Boolean));
 const io = new Server<
   ClientToServerEvents,
   ServerToClientEvents,
   InterServerEvents,
   SocketData
 >(httpServer, {
-  cors: { origin: true, credentials: true }
+  maxHttpBufferSize: 16_384,
+  cors: { origin: (origin, callback) => callback(null, !origin || process.env.NODE_ENV !== "production" || allowedOrigins.has(origin)) },
+  allowRequest: (request, callback) => {
+    const address = request.socket.remoteAddress ?? "unknown";
+    let originAllowed = !request.headers.origin || process.env.NODE_ENV !== "production";
+    try {
+      if (request.headers.origin) originAllowed ||= new URL(request.headers.origin).host === request.headers.host
+        || allowedOrigins.has(request.headers.origin);
+    } catch { originAllowed = false; }
+    callback(null, originAllowed && connections.allow(address) && io.engine.clientsCount < 200);
+  }
 });
 const rooms = new RoomManager();
 const configuredStudyLog = process.env.RPS_STUDY_LOG?.trim();
@@ -43,7 +66,8 @@ const studyLogPath = studyLogDisabled
   : configuredStudyLog
     ? resolve(configuredStudyLog)
     : resolve(process.cwd(), "../../game-logs/games.jsonl");
-if (studyLogPath) rooms.setStudyLogHandler(createJsonlStudyLogger(studyLogPath));
+const studyLogger = studyLogPath ? createJsonlStudyLogger(studyLogPath) : null;
+if (studyLogger) rooms.setStudyLogHandler(studyLogger);
 const configuredServerLog = process.env.RPS_SERVER_LOG?.trim();
 const serverLogDisabled = configuredServerLog !== undefined
   && ["0", "false", "off"].includes(configuredServerLog.toLowerCase());
@@ -52,7 +76,10 @@ const serverLogPath = serverLogDisabled
   : configuredServerLog
     ? resolve(configuredServerLog)
     : resolve(process.cwd(), "../../game-logs/server-actions.jsonl");
-if (serverLogPath) rooms.setServerLogHandler(createJsonlServerLogger(serverLogPath));
+const serverLogger = serverLogPath ? createJsonlServerLogger(serverLogPath) : null;
+if (serverLogger) rooms.setServerLogHandler(serverLogger);
+const botPool = new BotPool(rooms);
+rooms.setComputerScheduler((room) => botPool.schedule(room));
 
 app.get("/api/health", (_request, response) => {
   response.json({ ok: true, rooms: rooms.rooms.size, now: Date.now() });
@@ -86,6 +113,14 @@ function errorMessage(error: unknown): string {
 io.on("connection", (socket) => {
   socket.data.roomCode = null;
   socket.data.playerId = null;
+  socket.use((packet, next) => {
+    const valid = actions.allow(socket.handshake.address)
+      && (packet[0] !== "room:create" || creations.allow(socket.handshake.address));
+    if (valid) return next();
+    const callback = packet.at(-1);
+    if (typeof callback === "function") callback({ ok: false, error: "Too many requests. Wait a moment." });
+    else socket.emit("state:error", "Too many requests. Wait a moment.");
+  });
 
   const bind = (receipt: SessionReceipt): void => {
     socket.data.roomCode = receipt.roomCode;
@@ -93,6 +128,10 @@ io.on("connection", (socket) => {
   };
 
   const acknowledge = <T>(callback: (result: Ack<T>) => void, operation: () => T): void => {
+    if (typeof callback !== "function") {
+      socket.emit("state:error", "This request requires an acknowledgement callback.");
+      return;
+    }
     try {
       callback({ ok: true, data: operation() });
     } catch (error) {
@@ -102,6 +141,8 @@ io.on("connection", (socket) => {
 
   const context = (): { roomCode: string; playerId: string } => {
     if (!socket.data.roomCode || !socket.data.playerId) throw new Error("Join a room first.");
+    const { player } = rooms.roomForPlayer(socket.data.roomCode, socket.data.playerId);
+    if (player.socketId !== socket.id) throw new Error("This seat is active on another connection.");
     return { roomCode: socket.data.roomCode, playerId: socket.data.playerId };
   };
 
@@ -204,15 +245,25 @@ io.on("connection", (socket) => {
 const ticker = setInterval(() => rooms.tick(Date.now()), 100);
 const port = Number(process.env.PORT ?? 3001);
 httpServer.listen(port, "0.0.0.0", () => {
-  process.stdout.write(`RPS server listening on http://localhost:${port}\n`);
+  const address = httpServer.address();
+  process.stdout.write(`RPS server listening on http://localhost:${typeof address === "object" ? address?.port : port}\n`);
   if (studyLogPath) process.stdout.write(`Study log: ${studyLogPath}\n`);
   if (serverLogPath) process.stdout.write(`Private server log: ${serverLogPath}\n`);
 });
-
-const shutdown = (): void => {
+httpServer.on("error", (error: NodeJS.ErrnoException) => {
+  process.stderr.write(error.code === "EADDRINUSE"
+    ? `Port ${port} is already in use. Stop the other server or choose a different PORT.\n`
+    : `Server could not start: ${error.message}\n`);
   clearInterval(ticker);
-  io.close();
-  httpServer.close(() => process.exit(0));
+  process.exitCode = 1;
+});
+
+const shutdown = async (): Promise<void> => {
+  clearInterval(ticker);
+  const disconnected = new Promise<void>((resolve) => io.close(() => resolve()));
+  await botPool.close();
+  await disconnected;
+  await Promise.all([studyLogger?.close(), serverLogger?.close()]);
 };
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

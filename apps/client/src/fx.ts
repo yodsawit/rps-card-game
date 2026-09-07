@@ -3,6 +3,8 @@ import Phaser from "phaser";
 interface LaneClashFx {
   laneIndex: number;
   outcome: "win" | "loss" | "draw";
+  x: number;
+  y: number;
 }
 
 class AtmosphereScene extends Phaser.Scene {
@@ -42,11 +44,11 @@ class AtmosphereScene extends Phaser.Scene {
     });
   }
 
-  private laneClash({ laneIndex, outcome }: LaneClashFx): void {
+  private laneClash({ outcome, x, y }: LaneClashFx): void {
     const color = outcome === "win" ? 0x6ae6d9 : outcome === "loss" ? 0xff6178 : 0xffc76a;
     const { width, height } = this.scale;
-    const impactX = width * ((laneIndex + 1) / 4);
-    const impactY = height * 0.42;
+    const impactX = Phaser.Math.Clamp(x, 0, width);
+    const impactY = Phaser.Math.Clamp(y, 0, height);
     const ring = this.add.circle(impactX, impactY, 12, color, 0).setStrokeStyle(4, color, 0.9);
     this.tweens.add({
       targets: ring,

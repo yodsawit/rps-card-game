@@ -4,6 +4,7 @@ services:
     runtime: node
     region: singapore
     plan: free
+    autoDeployTrigger: checksPass
     buildCommand: npm ci && npm run build
     startCommand: npm start
     healthCheckPath: /api/health
@@ -12,3 +13,7 @@ services:
         value: "24.14.1"
       - key: RPS_STUDY_LOG
         value: "off"
+      - key: RPS_SERVER_LOG
+        value: "off"
+      - key: NODE_ENV
+        value: "production"

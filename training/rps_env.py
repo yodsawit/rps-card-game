@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import random
 from typing import Optional, Sequence
+from training.policy_schema import POLICY_SCHEMA
 
 
 SYMBOLS = ("rock", "paper", "scissors")
@@ -19,13 +20,13 @@ MIN_TABLE_SEATS = 2
 MAX_TABLE_SEATS = 6
 COPIES_PER_SYMBOL = 6
 STARTING_HP = 10
-MAX_TOTAL_HP = STARTING_HP * 2
+MAX_TOTAL_HP = POLICY_SCHEMA["normalization"]["hp"]
 MAX_HAND_SIZE = 5
 STARTING_HAND_SIZE = 3
 TRAINING_SCENARIOS = ("three_kind", "four_kind", "five_kind", "low_hp_draw", "max_hand")
-HEART_LEVELS = MAX_TABLE_SEATS * STARTING_HP + 1
-ACTION_SIZE = SYMBOL_COUNT * HEART_LEVELS
-OBSERVATION_SIZE = 90
+ACTION_SIZE = POLICY_SCHEMA["actionSchemas"][str(POLICY_SCHEMA["currentActionSchema"])]
+HEART_LEVELS = ACTION_SIZE // SYMBOL_COUNT
+OBSERVATION_SIZE = POLICY_SCHEMA["observationSize"]
 
 
 @dataclass

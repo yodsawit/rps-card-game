@@ -61,7 +61,7 @@ export interface BattleLane {
 export interface MatchOutcome {
   kind: "winner" | "draw";
   winnerId: PlayerId | null;
-  reason: "hp" | "showdown" | "forfeit";
+  reason: "hp" | "showdown" | "forfeit" | "error";
   showdownSymbols?: [CardSymbol | null, CardSymbol | null];
 }
 
@@ -88,11 +88,14 @@ export interface GameConfig {
   maximumHandSize: number;
 }
 
+export const DUEL_ANIMATION_MS = 2_000;
+export const BOT_TARGET_THINK_MS = 1_000;
+
 export const DEFAULT_GAME_CONFIG: Readonly<GameConfig> = {
   startingHp: 10,
   targetSelectionMs: 20_000,
   preparationMs: 20_000,
-  duelIntroMs: 2_000,
+  duelIntroMs: DUEL_ANIMATION_MS,
   // The client finishes its reveal/collection sequence in about 9.35 seconds,
   // leaving roughly 1.65 seconds of static results before drawing begins.
   battleRevealMs: 11_000,

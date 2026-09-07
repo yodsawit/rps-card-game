@@ -1,0 +1,75 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --ink: #edf6f2;
+  --muted: #869994;
+  --panel: rgba(15, 19, 28, 0.88);
+  --panel-strong: #151b25;
+  --line: rgba(154, 188, 179, 0.16);
+  --mint: #69ead8;
+  --mint-deep: #1b8e83;
+  --gold: #ffc76a;
+  --rose: #ff627b;
+  --hp-gain: #69ee75;
+  --hp-loss: #e3263e;
+  --hand-change: #48bfff;
+  --log-label-size: 11px;
+  --void: #07090e;
+  background: var(--void);
+  color: var(--ink);
+  font-synthesis: none;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app, #phaser-root {
+  width: 100%;
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-height: 100vh;
+  overflow-x: hidden;
+  background:
+    radial-gradient(circle at 50% 45%, rgba(35, 95, 91, 0.17), transparent 34rem),
+    radial-gradient(circle at 18% 15%, rgba(255, 163, 77, 0.09), transparent 27rem),
+    linear-gradient(145deg, #0a0d14 0%, #07090e 55%, #0d1017 100%);
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.14;
+  background-image: repeating-linear-gradient(105deg, transparent 0 38px, rgba(255,255,255,.025) 39px 40px);
+}
+
+button, input, select { font: inherit; }
+button { color: inherit; }
+
+#phaser-root {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+#app { position: relative; z-index: 1; min-height: 100vh; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.shell { width: min(1120px, calc(100% - 40px)); margin: 0 auto; }
+
+#audio-controls { position: fixed; right: 14px; bottom: 14px; z-index: 40; }
+.audio-toggle { width: 42px; height: 42px; border: 1px solid rgba(105,234,216,.3); border-radius: 50%; background: rgba(12,18,25,.94); color: var(--mint); box-shadow: 0 10px 30px rgba(0,0,0,.42); font-size: 18px; font-weight: 900; }
+.audio-toggle:hover, .audio-toggle:focus-visible { border-color: var(--mint); outline: 0; transform: translateY(-2px); }
+.audio-panel { position: absolute; right: 0; bottom: 50px; width: 240px; padding: 17px; border: 1px solid var(--line); border-radius: 13px 3px 13px 13px; background: rgba(14,20,29,.98); box-shadow: 0 20px 55px rgba(0,0,0,.55); opacity: 0; pointer-events: none; transform: translateY(8px) scale(.97); transform-origin: right bottom; transition: opacity .16s, transform .16s; }
+.audio-panel.open { opacity: 1; pointer-events: auto; transform: none; }
+.audio-panel-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; }
+.audio-panel-heading strong { color: var(--mint); font-size: 10px; letter-spacing: .18em; }
+.audio-panel-heading button { padding: 4px 0; background: transparent; color: var(--muted); font-size: 8px; font-weight: 900; letter-spacing: .11em; }
+.audio-panel label { display: block; margin-top: 12px; }
+.audio-panel label > span { display: flex; justify-content: space-between; color: var(--muted); font-size: 8px; font-weight: 900; letter-spacing: .12em; }
+.audio-panel label b { color: var(--ink); }
+.audio-panel input[type="range"] { width: 100%; height: 4px; margin-top: 10px; padding: 0; border: 0; border-radius: 4px; accent-color: var(--mint); background: rgba(255,255,255,.12); box-shadow: none; }

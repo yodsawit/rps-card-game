@@ -1,0 +1,17 @@
+{
+  "observationVersion": 1,
+  "observationSize": 90,
+  "symbols": ["rock", "paper", "scissors"],
+  "normalization": { "hp": 20, "hand": 8, "draw": 3 },
+  "actionSchemas": { "1": 63, "2": 183 },
+  "currentActionSchema": 2,
+  "features": [
+    { "name": "phaseOneHot", "offset": 0, "size": 5 },
+    { "name": "ownHpOpponentHp", "offset": 5, "size": 2 },
+    { "name": "ownHandCounts", "offset": 7, "size": 3 },
+    { "name": "publicContext", "offset": 10, "size": 8 },
+    { "name": "threeLanesOwnThenOpponent", "offset": 18, "size": 30 },
+    { "name": "oldestOpponentMemory", "offset": 48, "size": 21 },
+    { "name": "latestOpponentMemory", "offset": 69, "size": 21 }
+  ]
+}

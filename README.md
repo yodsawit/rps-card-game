@@ -6,12 +6,16 @@ triples, and five-of-a-kind showdowns. Players attack clockwise and may choose
 any living opponent; computer seats can be added from the room lobby.
 The host chooses a 20-second, 30-second, or unlimited timer shared by target
 selection, each card/HP pair, and discarding. Every selected matchup has a
-server-synchronized two-second table intro before preparation begins.
+server-synchronized two-second table intro before preparation begins, plus a
+one-second pause before automatic or bot selections.
 Locking any empty pair automatically commits the leftmost available card with
-0 HP. Explicitly placing the final card, or reaching it by timeout, still puts
-all remaining HP on that final pair.
+0 HP on the first two pairs. The final pair always receives all remaining HP,
+including when an empty lock automatically chooses the leftmost card.
+If the deck runs out, remaining draws are skipped. Discard requirements use
+the cards actually drawn; no draw means no discard. Mandatory draws are dealt
+in attacker-first order, without recycling pending discards early.
 
-Hosts can add a basic heuristic bot, the exact advanced GTO bot, or the learned
+Hosts can add a basic heuristic bot, the advanced GTO bot, or the learned
 PPO bot. Advanced bots
 share the last two public played-hand and draw-count observations, sample joint
 hidden-hand/deck states from that history, enumerate every legal remaining
@@ -22,7 +26,11 @@ each public reveal. Its battle utility is HP difference while the players are
 near parity; when its starting HP is at most half of the opponent's, surviving
 HP is weighted 1.5x so a trailing bot becomes more protective without becoming
 fully passive. A locked opponent's visible current-lane HP is modeled as exact,
-not as an amount the opponent could still increase.
+not as an amount the opponent could still increase. The matrix solution is
+exact to numerical tolerance for the sampled model, not an exact equilibrium
+of the full hidden-information game. Sampling and future opponent behavior
+remain modeling assumptions; decision logs report `historyFallbackRate` when
+sampling must relax historical constraints.
 
 During discard, ARC has a 30% collection mode: when the available cards permit
 a five-card `4+1` hand, it keeps four matching cards plus the symbol they beat
@@ -30,7 +38,9 @@ a five-card `4+1` hand, it keeps four matching cards plus the symbol they beat
 the remaining deck from the same jointly sampled public-information hand model
 used by its other decisions. It compares skipping with the probability-weighted
 value of every possible paid draw, charges the real one-HP cost, and evaluates
-the resulting discard choices with the same Bayesian maximin hand model.
+the resulting discard choices with the same HP-based Bayesian maximin utility
+as battle decisions. Guaranteed five-of-a-kind receives a terminal reward above
+the largest nonterminal HP payoff.
 ARC always purchases the optional draw when it holds four matching cards and
 the purchase is legal. For every bot matchup, all mandatory and bonus cards are
 drawn first, every bot then resolves its optional purchase, and only afterward
@@ -75,6 +85,9 @@ conversion drift.
 
 Set `RPS_STUDY_LOG` to another file path to relocate the log, or set it to
 `off` to disable logging.
+Both file loggers write asynchronously, cap queued data at 4 MiB, and rotate
+10 MiB files with five retained backups. Queue overflow or disk failures are
+reported to stderr; logs are diagnostic, not a guaranteed durable ledger.
 
 ### Private server audit log
 
@@ -111,16 +124,40 @@ reports live together in `apps/server/models`. Both `rps_policy.onnx` and
 The root `render.yaml` deploys the built client and Node/Socket.IO server as one
 free Render web service in Singapore. Render supplies `PORT`; the server binds
 to `0.0.0.0`, exposes `/api/health`, and serves the client from the same origin
-so public Socket.IO connections need no separate URL or CORS setup. Study-file
-logging is disabled because a free service has ephemeral storage.
+so public Socket.IO connections need no separate URL or CORS setup. Both file
+logs are disabled because a free service has ephemeral storage.
 
 Free services can sleep after an idle period, and every in-memory room is lost
 when the process sleeps, restarts, or redeploys. This configuration is suitable
 for public hobby play, not durable production rooms.
 
-When Render auto-deploy is enabled for the repository, a push to `main`
-automatically builds the commit and restarts the service. Existing in-memory
-rooms are lost during that restart.
+The Blueprint requests deployment after CI checks pass. This applies when the
+service is connected to the Git provider and its Blueprint settings are synced;
+an existing manually configured service does not change merely by editing this
+file. Public-URL-only services may require manual deployment. Existing rooms
+are lost during a restart.
+
+## Operational safeguards and checks
+
+Socket requests require valid payloads and acknowledgements where specified.
+Resuming a seat revokes control from its previous connection. Abandoned rooms
+expire, and rematches omit departed players. The server limits connections,
+room creation, packet size, and action rates; these are abuse safeguards, not
+authentication or a distributed DDoS defense. Production browser origins must
+match the server host or the comma-separated `RPS_ALLOWED_ORIGINS` allowlist.
+IP quotas use the direct peer address; a reverse proxy can share that quota
+across clients. Review limits for your hosting topology before wider rollout.
+
+Bot calculations run in at most two isolated workers with revision checks so
+stale results cannot overwrite newer player actions. Worker resource failures
+or calculations exceeding 12 seconds stop the affected match with an error
+result, not the entire server. The solver also has an iteration guard; it does
+not silently substitute a heuristic when mathematical solving fails.
+
+Run `npm run typecheck`, `npm test`, `npm run test:ui`, and `npm run build`.
+Browser tests use installed Edge on Windows and Playwright Chromium on Linux
+(`npx playwright install chromium`); override with `RPS_BROWSER_EXECUTABLE`.
+GitHub Actions also runs the Python training/checkpoint regressions.
 
 ## Structure
 
@@ -128,3 +165,11 @@ rooms are lost during that restart.
 - `packages/protocol`: privacy-safe client/server message types
 - `apps/server`: room, timer, reconnection, and match authority
 - `apps/client`: Vite, Phaser effects, and the game interface
+
+### Module boundaries
+
+- Client: `main.ts` wires browser dependencies; `application.ts` handles socket/input coordination. `views/` renders home, lobby, table, battle, draw and logs. `presentation/match.ts` owns animation timers and cleanup; `styles/` keeps the explicit CSS cascade order. Browser tests import the application factory without rewriting its source.
+- Server: `room-manager.ts` is the command facade. `room-sessions.ts` owns reconnect identity, `round-transitions.ts` advances rounds and public memory, and `match-journal.ts` builds the post-match log.
+- Bots: `bot-turn.ts` coordinates decisions on the authoritative server. Workers receive only typed inputs from `bot-decisions.ts`, never room credentials, hidden opponent hands, deck order or private logs. Revision checks reject superseded results; accepted buy/skip decisions survive restarts. All bot purchase decisions precede bot discard selection.
+- GTO: `game-core/src/advanced/` separates sampling, plans, linear programming, utility, pair and retention decisions. `advanced-ai.ts` preserves the public exports. Rules and GTO use the shared combat payout kernel.
+- Training: `training.self_play` remains the CLI and compatibility import surface; model, rollout, PPO, evaluation and artifact export are separate modules. `policy-schema.json` and shared observation fixtures guard Python/TypeScript compatibility. Neither this refactor nor a smoke training run replaces deployed policy weights.

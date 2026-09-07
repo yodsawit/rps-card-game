@@ -1,5 +1,7 @@
 # RPS self-play training
 
+The CLI remains `python -m training.self_play`; existing Colab notebooks and checkpoint state dictionaries remain compatible. Internally, `model.py`, `rollout.py`, `ppo.py`, `evaluation.py` and `artifacts.py` separate training responsibilities. The versioned contract lives in `packages/game-core/src/policy-schema.json`, with observation fixtures tested by both Python and TypeScript. Keep the repository checkout intact when running the trainer. Refactoring does not promote or replace production model weights.
+
 This folder trains a two-duelist neural RPS policy in Google Colab. Both live
 self-play seats share the same masked actor-critic network, so experience from
 either side improves one policy. Fine-tuning mixes in a production-aligned ARC
