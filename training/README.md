@@ -117,15 +117,34 @@ are restored and promotion exits with an error.
 The Python maximin controller is deliberately a fast training surrogate: it
 samples hands from only public memory and approximates the Bayesian equilibrium
 with exponentiated subgradient updates. The final TypeScript gate is therefore
-mandatory and uses the game's exact production GTO implementation.
+mandatory and uses the production sampled-model GTO implementation. Its matrix
+solver is exact to numerical tolerance, but its hidden-hand beliefs are sampled.
 
 Colab checkpoints written by Python 3.13 use the newer `pathlib._local` pickle
-name. The evaluator includes a compatibility unpickler so they can be promoted
-on Python 3.12 on Windows without changing the original ZIP.
+name. The restricted `weights_only=True` loader allows only the inert path
+aliases needed for compatibility; arbitrary pickle globals remain rejected.
+Never disable this restriction to load an untrusted archive.
+
+## Group HP action schema
+
+New policies use schema 2: 183 actions (three symbols times stakes 0–60).
+Schema 1 checkpoints with 63 actions migrate automatically when resumed: the
+original 0–20 stake logits are preserved and new higher-stake logits start with
+low probability. The optimizer is reset when the head expands. Training also
+includes higher-HP duel states from group-table totals. Observation HP scaling
+stays at 20 for compatibility; values may exceed 1.
+
+The current deployed model is not replaced by a source-code update. Legacy
+models safely commit all remaining HP on the final pair, but cannot learn
+higher early-pair stakes until schema 2 is trained and passes promotion.
+Run the usual Colab fine-tune and promotion workflow to update those weights.
+Deck exhaustion skips unavailable draws and derives discard debt from actual
+draws, matching the server.
 
 ## Local checks
 
-The environment has no third-party dependency:
+The environment itself has no third-party dependency; the full test suite also
+needs PyTorch and NumPy for checkpoint safety and migration checks:
 
 ```powershell
 python -m unittest discover -s training -p "test_*.py" -v

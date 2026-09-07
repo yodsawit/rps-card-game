@@ -7,6 +7,7 @@ dependencies in ``training/requirements-colab.txt``.
 from __future__ import annotations
 
 import argparse
+from training.checkpoints import load_checkpoint, load_policy_state
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
@@ -376,7 +377,8 @@ def save_checkpoint(
         "update": update,
         "observation_size": model.observation_size,
         "hidden_size": model.hidden_size,
-        "arguments": vars(arguments),
+        "action_schema": 2,
+        "arguments": json.loads(json.dumps(vars(arguments), default=str)),
     }, path)
 
 
@@ -489,9 +491,9 @@ def main() -> None:
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     first_update = 1
     if args.resume:
-        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
-        model.load_state_dict(checkpoint["model_state"])
-        if "optimizer_state" in checkpoint:
+        checkpoint = load_checkpoint(args.resume, device)
+        migrated = load_policy_state(model, checkpoint["model_state"])
+        if "optimizer_state" in checkpoint and not migrated:
             optimizer.load_state_dict(checkpoint["optimizer_state"])
         for parameter_group in optimizer.param_groups:
             parameter_group["lr"] = args.learning_rate
@@ -511,14 +513,12 @@ def main() -> None:
 
     baseline_model: Optional[MaskedActorCritic] = None
     if args.baseline_checkpoint:
-        baseline_checkpoint = torch.load(
-            args.baseline_checkpoint, map_location=device, weights_only=False
-        )
+        baseline_checkpoint = load_checkpoint(args.baseline_checkpoint, device)
         baseline_model = MaskedActorCritic(
             observation_size=int(baseline_checkpoint.get("observation_size", OBSERVATION_SIZE)),
             hidden_size=int(baseline_checkpoint.get("hidden_size", args.hidden_size)),
         ).to(device)
-        baseline_model.load_state_dict(baseline_checkpoint["model_state"])
+        load_policy_state(baseline_model, baseline_checkpoint["model_state"])
         baseline_model.eval()
         for parameter in baseline_model.parameters():
             parameter.requires_grad_(False)
@@ -670,7 +670,7 @@ def main() -> None:
             encoding="utf-8",
         )
     specification = {
-        "schema_version": 1,
+        "schema_version": 2,
         "observation_size": OBSERVATION_SIZE,
         "action_size": ACTION_SIZE,
         "symbols": list(SYMBOLS),

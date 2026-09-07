@@ -23,7 +23,7 @@ MAX_TOTAL_HP = STARTING_HP * 2
 MAX_HAND_SIZE = 5
 STARTING_HAND_SIZE = 3
 TRAINING_SCENARIOS = ("three_kind", "four_kind", "five_kind", "low_hp_draw", "max_hand")
-HEART_LEVELS = MAX_TOTAL_HP + 1
+HEART_LEVELS = MAX_TABLE_SEATS * STARTING_HP + 1
 ACTION_SIZE = SYMBOL_COUNT * HEART_LEVELS
 OBSERVATION_SIZE = 90
 
@@ -175,6 +175,12 @@ class RPSCardEnv:
                 reserve_hand.append(self._draw_one())
         if self.scenario:
             self._apply_training_scenario(self.scenario)
+        elif self.table_seats > 2 and self.rng.random() < 0.25:
+            # Later group duels may contain HP accumulated from other seats.
+            total = self.rng.randint(21, self.table_seats * STARTING_HP - 1)
+            first = self.rng.randint(1, total - 1)
+            self.players[0].hp = first
+            self.players[1].hp = total - first
         return self.observe(self.current_player), self.legal_action_mask()
 
     def _apply_training_scenario(self, scenario: str) -> None:
@@ -328,11 +334,10 @@ class RPSCardEnv:
     def _start_draw_phase(self) -> None:
         for player_index in self._duelist_order():
             player = self.players[player_index]
-            original_size = len(player.hand)
-            draw_count = 2 if player.no_loss_bonus else 1
+            draw_count = min(2 if player.no_loss_bonus else 1, len(self.deck))
             for _ in range(draw_count):
                 player.hand.append(self._draw_one())
-            player.required_discards = 2 if player.no_loss_bonus and original_size >= MAX_HAND_SIZE else 1
+            player.required_discards = max(min(draw_count, 1), len(player.hand) - MAX_HAND_SIZE)
             player.drawn_count = draw_count
             player.discarded_count = 0
             player.paid_draw = False
@@ -358,6 +363,16 @@ class RPSCardEnv:
         self.phase = "discard"
         self.actor_cursor = 0
         self.current_player = order[0]
+        self._skip_empty_discards()
+
+    def _skip_empty_discards(self) -> None:
+        while self.phase == "discard" and self.players[self.current_player].required_discards == 0:
+            if self.actor_cursor == 0:
+                self.actor_cursor = 1
+                self.current_player = self._duelist_order()[1]
+            else:
+                self._finish_discards()
+                return
 
     def _step_discard(self, action: int) -> None:
         player = self.players[self.current_player]
@@ -370,6 +385,7 @@ class RPSCardEnv:
         if self.actor_cursor == 0:
             self.actor_cursor = 1
             self.current_player = order[1]
+            self._skip_empty_discards()
             return
         self._finish_discards()
 

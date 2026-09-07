@@ -22,6 +22,30 @@ def battle_action(symbol: int, hearts: int) -> int:
 
 
 class RPSCardEnvironmentTests(unittest.TestCase):
+    def test_empty_deck_skips_draw_and_discard_without_shrinking_hands(self) -> None:
+        env = RPSCardEnv(seed=3)
+        env.players[0].hand = [0, 1, 2]
+        env.players[1].hand = [0, 1, 2]
+        env.deck.clear()
+        before = [list(player.hand) for player in env.players]
+        for lane, hearts in enumerate((3, 3, 4)):
+            env.step(battle_action(lane, hearts))
+            env.step(battle_action(lane, hearts))
+        self.assertEqual([player.required_discards for player in env.players], [0, 0])
+        self.assertFalse(env.legal_action_mask()[1])
+        env.step(0)
+        env.step(0)
+        self.assertEqual(env.phase, "battle")
+        self.assertEqual([player.hand for player in env.players], before)
+
+    def test_group_stakes_above_twenty_are_legal(self) -> None:
+        env = RPSCardEnv(seed=3, table_seats=6)
+        env.players[env.current_player].hp = 45
+        symbol = env.players[env.current_player].hand[0]
+        self.assertEqual(ACTION_SIZE, 183)
+        self.assertTrue(env.legal_action_mask()[battle_action(symbol, 45)])
+        env.step(battle_action(symbol, 45))
+
     def test_reset_has_the_authoritative_two_player_deck(self) -> None:
         env = RPSCardEnv(seed=3)
         self.assertEqual(len(env.deck), SYMBOL_COUNT * COPIES_PER_SYMBOL - 6)
@@ -157,7 +181,7 @@ class RPSCardEnvironmentTests(unittest.TestCase):
                         + sum(len(hand) for hand in env.reserve_hands)
                     )
                     self.assertEqual(card_total, SYMBOL_COUNT * env.copies_per_symbol)
-                    self.assertLessEqual(sum(player.hp for player in env.players), 20)
+                    self.assertLessEqual(sum(player.hp for player in env.players), env.table_seats * 10)
                     self.assertGreaterEqual(min(player.hp for player in env.players), 0)
                 self.assertIn(env.reason, {"hp", "showdown", "truncation"})
 

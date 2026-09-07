@@ -13,8 +13,6 @@ from hashlib import sha256
 from io import BytesIO
 import json
 from pathlib import Path
-import pathlib
-import pickle
 import subprocess
 import sys
 from typing import Any
@@ -26,6 +24,8 @@ import onnxruntime as ort
 import torch
 
 from training.self_play import MaskedActorCritic, export_onnx, play_episode
+from training.checkpoints import load_checkpoint, load_policy_state
+from training.rps_env import ACTION_SIZE
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,43 +74,13 @@ class ArtifactSource:
         return json.loads(self.bytes(name).decode("utf-8"))
 
 
-class CompatibleUnpickler(pickle.Unpickler):
-    """Read Python 3.13 pathlib checkpoints on Python 3.12 and earlier."""
-
-    def find_class(self, module: str, name: str) -> Any:
-        if module == "pathlib._local":
-            replacements = {
-                "Path": pathlib.PurePath,
-                "PosixPath": pathlib.PurePosixPath,
-                "WindowsPath": pathlib.PureWindowsPath,
-            }
-            if name in replacements:
-                return replacements[name]
-        return super().find_class(module, name)
-
-
-class CompatiblePickleModule:
-    __name__ = pickle.__name__
-    Unpickler = CompatibleUnpickler
-    Pickler = pickle.Pickler
-    load = staticmethod(pickle.load)
-    loads = staticmethod(pickle.loads)
-    dump = staticmethod(pickle.dump)
-    dumps = staticmethod(pickle.dumps)
-
-
 def load_model(checkpoint_bytes: bytes, device: torch.device) -> tuple[MaskedActorCritic, dict[str, Any]]:
-    checkpoint = torch.load(
-        BytesIO(checkpoint_bytes),
-        map_location=device,
-        weights_only=False,
-        pickle_module=CompatiblePickleModule,
-    )
+    checkpoint = load_checkpoint(BytesIO(checkpoint_bytes), device)
     model = MaskedActorCritic(
         observation_size=int(checkpoint["observation_size"]),
         hidden_size=int(checkpoint["hidden_size"]),
     ).to(device)
-    model.load_state_dict(checkpoint["model_state"])
+    load_policy_state(model, checkpoint["model_state"])
     model.eval()
     return model, checkpoint
 
@@ -195,7 +165,7 @@ def evaluate_head_to_head(
 def validate_onnx(model: MaskedActorCritic, path: Path) -> dict[str, Any]:
     rng = np.random.default_rng(20260906)
     observation = rng.normal(size=(1, 90)).astype(np.float32)
-    legal_mask = rng.random(size=(1, 63)) > 0.2
+    legal_mask = rng.random(size=(1, ACTION_SIZE)) > 0.2
     legal_mask[0, 0] = True
     with torch.no_grad():
         expected_logits, expected_value = model(
@@ -225,10 +195,10 @@ def validate_onnx(model: MaskedActorCritic, path: Path) -> dict[str, Any]:
 def export_json_weights(model: MaskedActorCritic, path: Path) -> None:
     state = model.state_dict()
     payload = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "observationSize": model.observation_size,
         "hiddenSize": model.hidden_size,
-        "actionSize": 63,
+        "actionSize": ACTION_SIZE,
         "layers": {
             "body0Weight": state["body.0.weight"].cpu().tolist(),
             "body0Bias": state["body.0.bias"].cpu().tolist(),
