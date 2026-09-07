@@ -279,10 +279,9 @@ export function lockPlayer(state: MatchState, playerId: PlayerId): void {
         !player.slots.some((candidate) => candidate.cardId === card.id)
       );
       if (!leftmost) throw new RuleError("No card is available for automatic placement.");
-      // A deliberate empty lock always stakes 0 HP, including on the final
-      // pair. Explicit placement and timeout completion keep their existing
-      // final-pair rule and commit every remaining heart.
-      slot.cardId = leftmost.id;
+      // Locking an empty pair uses the same placement rules as clicking the
+      // leftmost card. The final pair therefore receives every remaining HP.
+      setCardPlacement(state, playerId, state.preparationLane, leftmost.id);
     }
   }
   if (state.phase === "discard" && player.discardSelection.length !== player.requiredDiscards) {

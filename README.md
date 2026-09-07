@@ -24,6 +24,18 @@ HP is weighted 1.5x so a trailing bot becomes more protective without becoming
 fully passive. A locked opponent's visible current-lane HP is modeled as exact,
 not as an amount the opponent could still increase.
 
+During discard, ARC has a 30% collection mode: when the available cards permit
+a five-card `4+1` hand, it keeps four matching cards plus the symbol they beat
+(for example, `RRRRS`) instead of its usual `3+1+1` preference. GTO estimates
+the remaining deck from the same jointly sampled public-information hand model
+used by its other decisions. It compares skipping with the probability-weighted
+value of every possible paid draw, charges the real one-HP cost, and evaluates
+the resulting discard choices with the same Bayesian maximin hand model.
+ARC always purchases the optional draw when it holds four matching cards and
+the purchase is legal. For every bot matchup, all mandatory and bonus cards are
+drawn first, every bot then resolves its optional purchase, and only afterward
+may the first bot select any discards.
+
 ## Development
 
 ```powershell
@@ -64,15 +76,29 @@ conversion drift.
 Set `RPS_STUDY_LOG` to another file path to relocate the log, or set it to
 `off` to disable logging.
 
+### Private server audit log
+
+The server also writes `game-logs/server-actions.jsonl` for detailed match
+analysis. This server-only JSONL records the exact initial deal and later draws,
+plus every card placement, heart commit, lock, timeout, discard selection,
+committed discard, reveal, and outcome. Each entry includes the complete
+authoritative match state, including hidden hands and deck order.
+
+This file is intentionally never included in Socket.IO snapshots, bot memory,
+or any HTTP route, so neither players nor bots can read it. Treat it as
+sensitive match data. Set `RPS_SERVER_LOG` to another server-local path to
+relocate it, or set it to `off` to disable it.
+
 ## Self-play training
 
-The [Colab self-play notebook](training/RPS_Self_Play_Colab.ipynb) trains a
-shared masked PPO policy with two-player self-play, a scripted opponent, and a
-league of frozen policy snapshots. Its Python environment mirrors the two-seat
-deck, battle, draw, discard, triple, and showdown rules without exposing hidden
-cards. Training produces PyTorch checkpoints, metrics, an ONNX policy, and a
-machine-readable model specification. See [the training guide](training/README.md)
-before promoting a learned checkpoint into the server.
+The [Colab self-play notebook](training/RPS_Self_Play_Colab.ipynb) fine-tunes a
+shared masked PPO policy against self-play, production-aligned ARC, a fast
+Bayesian/maximin GTO-style opponent, and a frozen-policy league. It cycles
+through 2–6-seat deck distributions and oversamples rare collection/draw
+states. The local promotion gate compares old and candidate policies over at
+least 1,000 fixed-seed games each against the real TypeScript ARC and GTO,
+restoring the deployed model if the candidate fails. See
+[the training guide](training/README.md) before promotion.
 
 The promoted model, external ONNX data, model specification, and evaluation
 reports live together in `apps/server/models`. Both `rps_policy.onnx` and

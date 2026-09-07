@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  chooseAdvancedDraw,
   chooseAdvancedDiscards,
   chooseAdvancedPair,
+  chooseAdvancedTableDiscards,
   chooseAdvancedTarget,
   chooseComputerDiscards,
   chooseComputerPair,
@@ -245,6 +247,81 @@ describe("computer opponent", () => {
     expect(remaining.every((card) => card.symbol === "rock")).toBe(true);
   });
 
+  it("buys an advanced draw when its Bayesian value exceeds the one-HP cost", () => {
+    const hand = cards(["rock", "rock", "rock", "rock", "paper", "scissors"]);
+    const view = {
+      playerId: "bot",
+      hand,
+      hp: 10,
+      requiredDiscards: 1,
+      deckCount: 9,
+      copiesPerSymbol: 6,
+      opponents: [{
+        id: "opponent",
+        eliminated: false,
+        hp: 10,
+        handCount: 3,
+        memory: {
+          playedHands: [{
+            round: 1,
+            handCount: 3,
+            symbols: ["paper", "paper", "paper"] as const,
+            hearts: [3, 3, 4] as const
+          }],
+          drawChanges: []
+        }
+      }],
+      sampleCount: 64
+    };
+    const decision = chooseAdvancedDraw(view, seededRandom(71));
+
+    expect(decision.drawProbabilities.rock).toBeCloseTo(2 / 9, 7);
+    expect(decision.purchaseValue).toBeGreaterThan(decision.skipValue);
+    expect(decision.purchase).toBe(true);
+
+    const drawnHand = [...hand, { id: "new-rock", symbol: "rock" as const }];
+    const discarded = chooseAdvancedTableDiscards({
+      ...view,
+      hand: drawnHand,
+      hp: 9,
+      requiredDiscards: 2,
+      deckCount: 8
+    }, seededRandom(72));
+    const remaining = drawnHand.filter((card) => !discarded.includes(card.id));
+    expect(remaining).toHaveLength(5);
+    expect(remaining.every((card) => card.symbol === "rock")).toBe(true);
+  });
+
+  it("skips an advanced draw when it cannot earn back the one-HP cost", () => {
+    const decision = chooseAdvancedDraw({
+      playerId: "bot",
+      hand: cards(["rock", "rock", "paper", "scissors"]),
+      hp: 10,
+      requiredDiscards: 1,
+      deckCount: 11,
+      copiesPerSymbol: 6,
+      opponents: [{
+        id: "opponent",
+        eliminated: false,
+        hp: 10,
+        handCount: 3,
+        memory: {
+          playedHands: [{
+            round: 1,
+            handCount: 3,
+            symbols: ["rock", "paper", "scissors"] as const,
+            hearts: [3, 3, 4] as const
+          }],
+          drawChanges: []
+        }
+      }],
+      sampleCount: 64
+    }, seededRandom(73));
+
+    expect(decision.purchaseValue).toBeLessThan(decision.skipValue);
+    expect(decision.purchase).toBe(false);
+  });
+
   it("targets a living opponent and prefers a vulnerable seat", () => {
     expect(chooseComputerTarget("bot", cards(["rock", "paper", "scissors"]), [
       { id: "bot", hp: 10, eliminated: false },
@@ -293,6 +370,25 @@ describe("computer opponent", () => {
     expect(remaining).toHaveLength(5);
     expect(remaining.every((card) => card.symbol === "rock")).toBe(true);
     expect(chooseComputerDiscards(hand, 2, seededRandom(9), true)).toEqual(discarded);
+  });
+
+  it("uses a thirty-percent collection mode for a favorable four-plus-one hand", () => {
+    const hand = cards(["rock", "rock", "rock", "rock", "paper", "scissors"]);
+    let calls = 0;
+    const collectionRoll = (): number => calls++ === 0 ? 0.29 : 0.5;
+    const regularRoll = (): number => calls++ === 0 ? 0.3 : 0.5;
+
+    const collectionDiscard = chooseComputerDiscards(hand, 1, collectionRoll);
+    const collectionHand = hand.filter((card) => !collectionDiscard.includes(card.id));
+    expect(collectionHand.map((card) => card.symbol).sort()).toEqual([
+      "rock", "rock", "rock", "rock", "scissors"
+    ]);
+
+    calls = 0;
+    const regularDiscard = chooseComputerDiscards(hand, 1, regularRoll);
+    const regularHand = hand.filter((card) => !regularDiscard.includes(card.id));
+    expect(regularHand.filter((card) => card.symbol === "rock")).toHaveLength(3);
+    expect(new Set(regularHand.map((card) => card.symbol))).toEqual(new Set(["rock", "paper", "scissors"]));
   });
 
   it("changes out its dominant symbol after losing at least half its HP", () => {
@@ -391,6 +487,7 @@ describe("computer opponent", () => {
   it("never buys an extra draw with the final HP", () => {
     const hand = cards(["rock", "rock", "rock", "rock"]);
     expect(shouldComputerPurchaseExtraDraw(hand, 1, 5, seededRandom(1))).toBe(false);
+    expect(shouldComputerPurchaseExtraDraw(hand, 2, 5, seededRandom(1))).toBe(true);
     expect(shouldComputerPurchaseExtraDraw(hand, 5, 5, seededRandom(1))).toBe(true);
   });
 

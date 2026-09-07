@@ -1,4 +1,4 @@
-import type { BattleSlot, Card, CardSymbol, PlayerId, PreparationLane, RandomSource } from "./types.js";
+import { CARD_SYMBOLS, type BattleSlot, type Card, type CardSymbol, type PlayerId, type PreparationLane, type RandomSource } from "./types.js";
 
 export interface PublicOpponentPosition {
   occupied: boolean;
@@ -96,6 +96,12 @@ function counterSymbol(symbol: CardSymbol): CardSymbol {
   if (symbol === "rock") return "paper";
   if (symbol === "paper") return "scissors";
   return "rock";
+}
+
+function defeatedSymbol(symbol: CardSymbol): CardSymbol {
+  if (symbol === "rock") return "scissors";
+  if (symbol === "paper") return "rock";
+  return "paper";
 }
 
 function combinations<T>(items: readonly T[], size: number): T[][] {
@@ -228,7 +234,7 @@ export function shouldComputerPurchaseExtraDraw(
   const counts = new Map<Card["symbol"], number>();
   for (const card of hand) counts.set(card.symbol, (counts.get(card.symbol) ?? 0) + 1);
   const bestCollection = Math.max(0, ...counts.values());
-  if (bestCollection >= 4 && hp >= 3) return true;
+  if (bestCollection >= 4) return true;
   if (recentLossRatio >= 0.5 && hp >= 3) {
     const survivalDrawChance = Math.min(0.98, 0.7 + recentLossRatio * 0.28);
     return random() < survivalDrawChance;
@@ -266,13 +272,20 @@ export function chooseComputerDiscards(
       .filter(([, count]) => count === largestCollection)
       .map(([symbol]) => symbol)
   );
+  const pursueFourOne = hand.length - requiredDiscards === 5 && random() < 0.3;
   const candidates = combinations(hand, requiredDiscards).map((discarded) => {
     const ids = new Set(discarded.map((card) => card.id));
     const remaining = hand.filter((card) => !ids.has(card.id));
+    const remainingCounts = countSymbols(remaining.map((card) => card.symbol));
+    const fourSymbol = CARD_SYMBOLS.find((symbol) => remainingCounts[symbol] === 4);
+    const oneSymbol = CARD_SYMBOLS.find((symbol) => remainingCounts[symbol] === 1);
+    const favorableFourOne = fourSymbol !== undefined
+      && oneSymbol === defeatedSymbol(fourSymbol);
     return {
       discarded,
       score:
         remainingHandScore(remaining)
+        + (pursueFourOne && favorableFourOne ? 1_000 : 0)
         + (survivalMode
           ? discarded.filter((card) => dominantSymbols.has(card.symbol)).length * 80
           : 0)

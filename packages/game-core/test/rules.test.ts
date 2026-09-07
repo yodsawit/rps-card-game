@@ -112,7 +112,7 @@ describe("RPS rules", () => {
     expect(state.defenderId).toBeNull();
     expect(state.config.copiesPerSymbol).toBe(seats + 4);
     expect(state.config.duelIntroMs).toBe(2_000);
-    expect(state.config.battleRevealMs).toBe(13_000);
+    expect(state.config.battleRevealMs).toBe(11_000);
     expect(countAllCards(state)).toBe((seats + 4) * 3);
     const allCards = [...state.deck, ...state.players.flatMap((candidate) => candidate.hand)];
     expect(["rock", "paper", "scissors"].map((symbol) =>
@@ -199,10 +199,33 @@ describe("RPS rules", () => {
       for (const duelist of duelists) lockPlayer(state, duelist.id);
       for (let playerIndex = 0; playerIndex < duelists.length; playerIndex += 1) {
         expect(duelists[playerIndex]!.slots[lane]!.cardId).toBe(originalOrders[playerIndex]![lane]);
-        expect(duelists[playerIndex]!.slots[lane]!.hearts).toBe(0);
+        expect(duelists[playerIndex]!.slots[lane]!.hearts).toBe(lane === 2 ? 10 : 0);
       }
       advancePreparationPair(state, 2_000 + lane, seededRandom(lane));
     }
+  });
+
+  it("commits all remaining HP when the final pair is locked without a card", () => {
+    const state = makeMatch();
+    startDuel(state);
+    const first = player(state, "p0");
+    const second = player(state, "p1");
+    const originalOrder = first.hand.map((card) => card.id);
+
+    setCardPlacement(state, first.id, 0, originalOrder[0]!);
+    adjustSlotHearts(state, first.id, 0, 4);
+    lockPlayer(state, first.id);
+    lockPlayer(state, second.id);
+    advancePreparationPair(state, 2_000, seededRandom(1));
+
+    setCardPlacement(state, first.id, 1, originalOrder[1]!);
+    adjustSlotHearts(state, first.id, 1, 1);
+    lockPlayer(state, first.id);
+    lockPlayer(state, second.id);
+    advancePreparationPair(state, 3_000, seededRandom(2));
+
+    lockPlayer(state, first.id);
+    expect(first.slots[2]).toEqual({ cardId: originalOrder[2], hearts: 5 });
   });
 
   it("transfers losing stakes minus one and returns each winner's own stake", () => {

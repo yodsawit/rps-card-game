@@ -6,6 +6,7 @@ import type {
   BattleSideView,
   ClientToServerEvents,
   LobbySnapshot,
+  MatchRoundLogView,
   MatchSnapshot,
   PublicPlayerView,
   ServerSnapshot,
@@ -18,6 +19,8 @@ import { GameAudio } from "./audio.js";
 const SESSION_KEY = "rps-session-v1";
 const NAME_KEY = "rps-player-name";
 const LANE_NAMES = ["LEFT", "CENTER", "RIGHT"] as const;
+const DUEL_ANIMATION_MS = 2_000;
+const BOT_TARGET_THINK_MS = 1_000;
 
 interface PokerPosition {
   playerId: string;
@@ -97,6 +100,9 @@ class RpsClient {
   private readonly completedBattleSequences = new Set<string>();
   private activeOutcomeSequence: { key: string; startedAt: number; timer: number } | null = null;
   private readonly completedOutcomeSequences = new Set<string>();
+  private matchLogOpen = false;
+  private selectedLogRound: number | null = null;
+  private selectedLogTab: "resolve" | "cards" = "resolve";
   private readonly firedBattleMoments = new Set<string>();
   private readonly animatedDrawCards = new Set<string>();
   private readonly revealedPairs = new Set<string>();
@@ -120,6 +126,9 @@ class RpsClient {
         this.completedBattleSequences.clear();
         this.clearOutcomeTimer();
         this.completedOutcomeSequences.clear();
+        this.matchLogOpen = false;
+        this.selectedLogRound = null;
+        this.selectedLogTab = "resolve";
         this.firedBattleMoments.clear();
         this.animatedDrawCards.clear();
         this.revealedPairs.clear();
@@ -535,12 +544,15 @@ class RpsClient {
     }).join("");
     const attackerPosition = positions.find((position) => position.playerId === attacker.id)!;
     const defenderPosition = defender ? positions.find((position) => position.playerId === defender.id)! : null;
+    const botThinkDelay = attacker.isBot || livingCount === 2 ? BOT_TARGET_THINK_MS : 0;
+    const introDuration = DUEL_ANIMATION_MS + botThinkDelay;
     const introElapsed = introActive && view.deadlineAt !== null
-      ? Math.min(Math.max(2_000 - (view.deadlineAt - view.serverNow), 0), 2_000)
+      ? Math.min(Math.max(introDuration - (view.deadlineAt - view.serverNow), 0), introDuration)
       : 0;
+    const punchDelay = botThinkDelay - introElapsed;
     const punch = defender && defenderPosition ? `
       <div class="versus-punch" aria-label="${escapeHtml(attacker.name)} challenges ${escapeHtml(defender.name)}"
-        style="--from-x:${attackerPosition.x.toFixed(2)}%;--from-y:${attackerPosition.y.toFixed(2)}%;--to-x:${defenderPosition.x.toFixed(2)}%;--to-y:${defenderPosition.y.toFixed(2)}%;--intro-delay:-${introElapsed}ms">
+        style="--from-x:${attackerPosition.x.toFixed(2)}%;--from-y:${attackerPosition.y.toFixed(2)}%;--to-x:${defenderPosition.x.toFixed(2)}%;--to-y:${defenderPosition.y.toFixed(2)}%;--intro-delay:${punchDelay}ms">
         <span>VS</span><i></i>
       </div>` : "";
     return `
@@ -715,7 +727,7 @@ class RpsClient {
             : "WAITING";
       return `
         <section class="battle-lane ${pairState} ${sequencePending && view.battle ? "lane-revealing" : ""} ${selfBattle && !sequencePending ? `result-${selfBattle.result} lane-resolved` : ""}" data-slot="${index}" data-result="${selfBattle?.result ?? ""}">
-          ${view.phase === "preparation" ? `<span class="pair-phase-label">${index === view.activeLane ? "CURRENT PAIR" : ""}</span>` : ""}
+          <span class="pair-phase-label" aria-hidden="true">${view.phase === "preparation" && index === view.activeLane ? "CURRENT PAIR" : ""}</span>
           <div class="slot opponent-slot">
             ${this.boardCard(
               opponent.slots[index]!,
@@ -735,12 +747,14 @@ class RpsClient {
             ${this.boardCard(bottom.slots[index]!, selfBattle?.symbol ?? bottom.slots[index]!.symbol, true, view.phase, emptyLabel)}
             <span class="heart-badge own" data-lane-heart="self">♥ ${collectionComplete ? 0 : selfBattle?.hearts ?? bottom.slots[index]!.hearts}</span>
           </div>
-          ${view.phase === "preparation" && selfIsDuelist && !self.locked && index === view.activeLane ? `
-            ${view.activeLane < 2 ? `<div class="heart-controls">
-              <button data-heart="1" data-index="${index}" ${!self.slots[index]!.occupied || unassigned <= 0 ? "disabled" : ""}>+1</button>
-              <button data-heart="${unassigned}" data-heart-mode="all" data-index="${index}" ${!self.slots[index]!.occupied || unassigned <= 0 ? "disabled" : ""}>ALL</button>
-            </div>` : self.slots[index]!.occupied ? '<span class="forced-allocation">ALL REMAINING HP</span>' : ""}
-          ` : ""}
+          <div class="pair-action-space">
+            ${view.phase === "preparation" && selfIsDuelist && !self.locked && index === view.activeLane ? `
+              ${view.activeLane < 2 ? `<div class="heart-controls">
+                <button data-heart="1" data-index="${index}" ${!self.slots[index]!.occupied || unassigned <= 0 ? "disabled" : ""}>+1</button>
+                <button data-heart="${unassigned}" data-heart-mode="all" data-index="${index}" ${!self.slots[index]!.occupied || unassigned <= 0 ? "disabled" : ""}>ALL</button>
+              </div>` : self.slots[index]!.occupied ? '<span class="forced-allocation">ALL REMAINING HP</span>' : ""}
+            ` : ""}
+          </div>
         </section>
       `;
     }).join("");
@@ -752,6 +766,7 @@ class RpsClient {
       ${this.duelistBox(view, bottom, displayBottomHp, "bottom")}
       <section class="player-console">
         ${selfIsDuelist && view.phase === "preparation" ? `<div class="self-summary"><span class="unassigned ${view.activeLane === 2 && !self.slots[2].occupied ? "danger" : "safe"}"><small>HP LEFT</small><strong>♥ ${unassigned}</strong></span></div>` : !selfIsDuelist ? '<div class="self-summary"><span><small>YOU ARE WATCHING</small><strong class="spectating-label">SPECTATOR</strong></span></div>' : ""}
+        ${selfIsDuelist && view.phase !== "preparation" ? '<div class="self-summary" aria-hidden="true"></div>' : ""}
         <div class="hand-row">${view.self.hand.map((card) => this.handCard(card, self, view)).join("")}</div>
         ${view.phase === "preparation" && selfIsDuelist ? `
           <div class="phase-actions">
@@ -763,7 +778,7 @@ class RpsClient {
                   : "Lock now to commit your leftmost card with 0 HP."
                 : self.slots[2].occupied
                   ? `The final card automatically carries all ${self.slots[2].hearts} remaining HP.`
-                  : `Lock now to commit your leftmost card with 0 HP and lose ${unassigned} unassigned HP.`}</p>
+                  : `Lock now to auto-play your leftmost card with all ${unassigned} remaining HP.`}</p>
             <button class="primary lock-button" data-action="lock" ${self.locked ? "disabled" : ""}>${self.locked ? "LOCKED" : `LOCK PAIR ${view.activeLane + 1}`}</button>
           </div>
         ` : view.phase === "preparation" ? `<p class="reveal-message">${escapeHtml(bottom.name)} and ${escapeHtml(opponent.name)} are committing pair ${view.activeLane + 1}.</p>` : view.phase === "battle" || sequencePending || view.phase === "finished" ? '<p class="reveal-message">Cards revealed. Resolving lanes, then collecting every card\'s hearts…</p>' : ""}
@@ -855,6 +870,7 @@ class RpsClient {
   }
 
   private resultOverlay(view: MatchSnapshot, self: PublicPlayerView): string {
+    if (this.matchLogOpen) return this.matchLogOverlay(view);
     const won = view.outcome?.winnerId === self.id;
     const draw = view.outcome?.kind === "draw";
     const winner = view.players.find((player) => player.id === view.outcome?.winnerId);
@@ -876,11 +892,159 @@ class RpsClient {
           <p>${detail}</p>
           <div class="result-actions">
             <button class="primary" data-action="rematch" ${self.rematchRequested ? "disabled" : ""}>${self.rematchRequested ? "REMATCH REQUESTED" : "REQUEST REMATCH"}</button>
+            <button class="secondary" data-action="view-log" ${view.matchLog.length === 0 ? "disabled" : ""}>VIEW LOG</button>
             <button class="ghost" data-action="leave">LEAVE TABLE</button>
           </div>
         </section>
       </div>
     `;
+  }
+
+  private matchLogOverlay(view: MatchSnapshot): string {
+    const requestedIndex = view.matchLog.findIndex((entry) => entry.round === this.selectedLogRound);
+    const selectedIndex = requestedIndex >= 0 ? requestedIndex : 0;
+    const selected = view.matchLog[selectedIndex];
+    const atFirst = selectedIndex <= 0;
+    const atLast = selectedIndex >= view.matchLog.length - 1;
+    const selectedAttacker = selected ? this.logPlayerName(view, selected.attackerId) : "Unknown player";
+    const selectedDefender = selected?.defenderId ? this.logPlayerName(view, selected.defenderId) : "No opponent";
+    return `
+      <div class="result-scrim log-scrim">
+        <section class="match-log-card" aria-label="Match log">
+          <header class="match-log-header">
+            <h2>ROUND <strong>${selected?.round ?? "-"}</strong></h2>
+            <p class="match-log-matchup"><span>${escapeHtml(selectedAttacker)}</span><i>challenged</i><span>${escapeHtml(selectedDefender)}</span></p>
+            <button class="icon-button" data-action="close-log" aria-label="Close match log"><span class="log-close-mark" aria-hidden="true"></span></button>
+          </header>
+          <div class="match-log-body">
+            <div class="log-round-detail">
+              ${selected ? this.matchRoundDetail(view, selected) : '<p class="log-empty">No recorded rounds.</p>'}
+            </div>
+          </div>
+          <nav class="log-round-nav" aria-label="Travel through rounds">
+            ${this.logRoundNavButton("first", "FIRST ROUND", atFirst)}
+            ${this.logRoundNavButton("previous", "PREVIOUS ROUND", atFirst)}
+            ${this.logRoundNavButton("next", "NEXT ROUND", atLast)}
+            ${this.logRoundNavButton("last", "LAST ROUND", atLast)}
+          </nav>
+        </section>
+      </div>`;
+  }
+
+  private matchRoundDetail(view: MatchSnapshot, entry: MatchRoundLogView): string {
+    const duelists = [...entry.players].filter((player) => player.role !== "idle").sort((left, right) => {
+      const order = { attacker: 0, defender: 1, idle: 2 } as const;
+      return order[left.role] - order[right.role];
+    });
+    const idlePlayers = entry.players.filter((player) => player.role === "idle");
+    return `
+      <nav class="log-tabs" aria-label="Round information">
+        <button class="${this.selectedLogTab === "resolve" ? "active" : ""}" data-log-tab="resolve" aria-selected="${this.selectedLogTab === "resolve"}">RESOLVE</button>
+        <button class="${this.selectedLogTab === "cards" ? "active" : ""}" data-log-tab="cards" aria-selected="${this.selectedLogTab === "cards"}">PLAYER CARDS</button>
+      </nav>
+      ${this.selectedLogTab === "cards"
+        ? this.matchRoundHands(view, entry)
+        : `<div class="log-resolve-board">
+            ${duelists.map((player, index) => `${index === 1 ? '<div class="log-resolve-versus"><span>VS</span></div>' : ""}${this.matchResolvePlayer(view, player)}`).join("")}
+            ${idlePlayers.length > 0 ? `<div class="log-idle-strip"><small>NOT IN THIS DUEL</small>${idlePlayers.map((player) => `<span>${escapeHtml(this.logPlayerName(view, player.playerId))} <i>&hearts; ${player.hpAfter}</i></span>`).join("")}</div>` : ""}
+          </div>`}`;
+  }
+
+  private matchResolvePlayer(view: MatchSnapshot, player: MatchRoundLogView["players"][number]): string {
+    const hasBattle = player.playedCards.some((symbol) => symbol !== null);
+    const hasShuffle = player.drawnCards.length > 0 || player.discardedCards.length > 0 || player.paidExtraDraw;
+    const hpDelta = player.hpAfter - player.hpBefore;
+    const handDelta = player.handCountAfter - player.handCountBefore;
+    return `
+      <article class="log-resolve-player ${player.role}">
+        <header>
+          <small>${player.role.toUpperCase()}</small>
+          <strong>${escapeHtml(this.logPlayerName(view, player.playerId))}</strong>
+          <span class="log-player-hp"><b>&hearts;</b> ${player.hpBefore}${this.logSignedDelta(hpDelta, "hp")}</span>
+          <span class="log-player-status">
+            ${player.eliminatedAfter ? '<em>OUT</em>' : `<span class="log-player-hand">HAND ${player.handCountBefore}${this.logSignedDelta(handDelta, "hand")}</span>`}
+          </span>
+        </header>
+        <section class="log-resolve-cards">
+          ${player.playedCards.map((symbol, index) => {
+            const result = player.results[index];
+            const receivedHp = player.receivedHp[index] ?? 0;
+            return `
+              <div class="log-battle-card ${result ?? "pending"}">
+                <div class="log-card-stake">
+                  ${this.logCardIcon(symbol, true)}
+                </div>
+                <span class="log-card-heart"><b>&hearts;</b> ${player.hearts[index]}</span>
+                <footer>
+                  <strong>${result?.toUpperCase() ?? "NOT RESOLVED"}</strong>
+                  ${receivedHp > 0 ? `<em>+${receivedHp} HP</em>` : ""}
+                </footer>
+              </div>`;
+          }).join("")}
+        </section>
+        <section class="log-resolve-shuffle">
+          <div>
+            <strong>${player.paidExtraDraw ? "BOUGHT +1 CARD" : "NO EXTRA CARD"}</strong>
+            ${player.bonusDraw ? "<span>NO-LOSS BONUS +1</span>" : ""}
+          </div>
+          <div>
+            <p class="log-section-label">DRAWN</p>
+            <span class="log-card-row">${player.drawnCards.length > 0 ? player.drawnCards.map((symbol) => this.logCardIcon(symbol)).join("") : `<i>${hasBattle ? "NONE" : "ROUND ENDED"}</i>`}</span>
+          </div>
+          <div>
+            <p class="log-section-label">DISCARDED</p>
+            <span class="log-card-row">${player.discardedCards.length > 0 ? player.discardedCards.map((symbol) => this.logCardIcon(symbol)).join("") : `<i>${hasShuffle ? "NONE" : "NO RESHUFFLE"}</i>`}</span>
+          </div>
+        </section>
+      </article>`;
+  }
+
+  private matchRoundHands(view: MatchSnapshot, entry: MatchRoundLogView): string {
+    const playersBySeat = [...entry.players].sort((left, right) => {
+      const leftSeat = view.players.find((player) => player.id === left.playerId)?.seatIndex ?? 99;
+      const rightSeat = view.players.find((player) => player.id === right.playerId)?.seatIndex ?? 99;
+      return leftSeat - rightSeat;
+    });
+    return `
+      <section class="log-hand-table">
+        <header>
+          <div><strong>PLAYER HANDS</strong><small>Before battle</small></div>
+        </header>
+        <div class="log-hand-columns" aria-hidden="true"><span>PLAYER</span>${[1, 2, 3, 4, 5].map((column) => `<span>CARD ${column}</span>`).join("")}</div>
+        ${playersBySeat.map((player) => {
+          const cards = [...player.handBeforeDrawDiscard];
+          return `
+            <div class="log-hand-row">
+              <div class="log-hand-player">
+                <strong>${escapeHtml(this.logPlayerName(view, player.playerId))}</strong>
+                <span class="log-hand-role">${player.role === "idle" ? "NOT IN DUEL" : player.role.toUpperCase()}</span>
+                <span class="log-hand-hp"><b>&hearts;</b> ${player.hpBefore}</span>
+              </div>
+              ${[0, 1, 2, 3, 4].map((index) => `<div class="log-hand-cell">${this.logCardIcon(cards[index] ?? null, true)}</div>`).join("")}
+            </div>`;
+        }).join("")}
+      </section>`;
+  }
+
+  private logRoundNavButton(action: "first" | "previous" | "next" | "last", label: string, disabled: boolean): string {
+    const backwards = action === "first" || action === "previous";
+    const edge = action === "first" || action === "last";
+    return `<button class="log-nav-button ${backwards ? "back" : "forward"} ${edge ? "edge" : "step"}" data-log-nav="${action}" aria-label="${label}" title="${label}" ${disabled ? "disabled" : ""}><i></i>${edge ? "<b></b>" : ""}</button>`;
+  }
+
+  private logPlayerName(view: MatchSnapshot, playerId: string): string {
+    return view.players.find((player) => player.id === playerId)?.name ?? "Unknown player";
+  }
+
+  private logSignedDelta(delta: number, kind: "hp" | "hand"): string {
+    if (delta === 0) return "";
+    const direction = delta > 0 ? "gain" : "loss";
+    return `<i class="log-delta ${kind} ${direction}">${delta > 0 ? "+" : "&minus;"}${Math.abs(delta)}</i>`;
+  }
+
+  private logCardIcon(symbol: CardSymbol | null, large = false): string {
+    if (!symbol) return `<span class="log-card-icon empty ${large ? "large" : ""}" aria-label="No card">&mdash;</span>`;
+    return `<span class="log-card-icon face ${large ? "large" : ""}" title="${symbolLabel(symbol)}" aria-label="${symbolLabel(symbol)}">${cardFace(symbol, true)}</span>`;
   }
 
   private bindMatch(
@@ -974,6 +1138,37 @@ class RpsClient {
     app.querySelector<HTMLElement>("[data-action='rematch']")?.addEventListener("click", () => {
       this.socket.emit("room:rematch");
     });
+    app.querySelector<HTMLElement>("[data-action='view-log']")?.addEventListener("click", () => {
+      this.matchLogOpen = true;
+      this.selectedLogRound = view.matchLog[0]?.round ?? null;
+      this.selectedLogTab = "resolve";
+      this.render();
+    });
+    app.querySelector<HTMLElement>("[data-action='close-log']")?.addEventListener("click", () => {
+      this.matchLogOpen = false;
+      this.render();
+    });
+    app.querySelectorAll<HTMLElement>("[data-log-tab]").forEach((button) => {
+      button.addEventListener("click", () => {
+        this.selectedLogTab = button.dataset.logTab === "cards" ? "cards" : "resolve";
+        this.render();
+      });
+    });
+    app.querySelectorAll<HTMLElement>("[data-log-nav]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const currentIndex = Math.max(view.matchLog.findIndex((entry) => entry.round === this.selectedLogRound), 0);
+        const action = button.dataset.logNav;
+        const targetIndex = action === "first"
+          ? 0
+          : action === "last"
+            ? view.matchLog.length - 1
+            : action === "previous"
+              ? currentIndex - 1
+              : currentIndex + 1;
+        this.selectedLogRound = view.matchLog[Math.max(0, Math.min(targetIndex, view.matchLog.length - 1))]?.round ?? null;
+        this.render();
+      });
+    });
     app.querySelector<HTMLElement>("[data-action='buy-draw']")?.addEventListener("click", () => {
       this.socket.emit("match:buy-draw");
     });
@@ -1008,6 +1203,9 @@ class RpsClient {
     localStorage.removeItem(SESSION_KEY);
     this.snapshot = null;
     this.selectedCardId = null;
+    this.matchLogOpen = false;
+    this.selectedLogRound = null;
+    this.selectedLogTab = "resolve";
     this.clearBattleTimers();
     this.clearOutcomeTimer();
     this.clearDrawTimers();
@@ -1058,7 +1256,9 @@ class RpsClient {
     if (this.completedOutcomeSequences.has(key) || this.activeOutcomeSequence?.key === key) return;
     this.clearOutcomeTimer();
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const duration = reducedMotion ? 350 : this.outcomeCrownDelay(view) + 1_450;
+    // Hold the finished table for one additional second after the crown lands
+    // before replacing it with the victory, draw, or defeat modal.
+    const duration = reducedMotion ? 1_350 : this.outcomeCrownDelay(view) + 2_450;
     const startedAt = performance.now();
     const timer = window.setTimeout(() => {
       this.completedOutcomeSequences.add(key);

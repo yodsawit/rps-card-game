@@ -66,6 +66,30 @@ export interface AdvancedTargetView {
   sampleCount?: number;
 }
 
+export interface AdvancedShuffleOpponent extends PublicOpponentSamplingView {
+  eliminated: boolean;
+  hp: number;
+}
+
+export interface AdvancedShuffleView {
+  playerId: PlayerId;
+  hand: readonly Card[];
+  hp: number;
+  requiredDiscards: number;
+  deckCount: number;
+  copiesPerSymbol: number;
+  opponents: readonly AdvancedShuffleOpponent[];
+  sampleCount?: number;
+}
+
+export interface AdvancedDrawAnalysis {
+  purchase: boolean;
+  skipValue: number;
+  purchaseValue: number | null;
+  drawProbabilities: Record<CardSymbol, number>;
+  sampleCount: number;
+}
+
 export interface AdvancedPairView extends HandSamplingView {
   playerId: PlayerId;
   hand: readonly Card[];
@@ -803,6 +827,204 @@ function duelUtility(
     ? CRITICAL_HP_PRESERVATION_WEIGHT
     : 1;
   return preservationWeight * ownFinal - opposingFinal;
+}
+
+interface AdvancedRetentionModel {
+  opponentTypes: BayesianType<readonly CardSymbol[]>[];
+  drawProbabilities: Record<CardSymbol, number>;
+  sampleCount: number;
+  showdownValue: number;
+  handValues: Map<string, number>;
+}
+
+interface AdvancedRetentionChoice {
+  discarded: Card[];
+  value: number;
+}
+
+function sequenceUtility(
+  ownSymbols: readonly CardSymbol[],
+  opposingSymbols: readonly CardSymbol[]
+): number {
+  const ownTriple = isTriple(ownSymbols);
+  const opposingTriple = isTriple(opposingSymbols);
+  let value = 0;
+  for (let lane = 0; lane < 3; lane += 1) {
+    let result = compareSymbols(ownSymbols[lane]!, opposingSymbols[lane]!);
+    if (result === 0 && ownTriple !== opposingTriple) result = ownTriple ? 1 : -1;
+    value += result;
+  }
+  return value;
+}
+
+function buildAdvancedRetentionModel(
+  view: AdvancedShuffleView,
+  random: RandomSource
+): AdvancedRetentionModel {
+  const sampled = sampleAllOpponentHands({
+    copiesPerSymbol: view.copiesPerSymbol,
+    observerHand: view.hand,
+    opponents: view.opponents.map((opponent) => ({
+      id: opponent.id,
+      handCount: opponent.handCount,
+      memory: opponent.memory,
+      ...(opponent.currentRevealedSymbols
+        ? { currentRevealedSymbols: opponent.currentRevealedSymbols }
+        : {})
+    }))
+  }, random, view.sampleCount ?? 512);
+  const expectedHeld = emptyCounts();
+  for (const opponent of sampled) {
+    for (const hand of opponent.hands) {
+      expectedHeld.rock += hand.counts.rock * hand.probability;
+      expectedHeld.paper += hand.counts.paper * hand.probability;
+      expectedHeld.scissors += hand.counts.scissors * hand.probability;
+    }
+  }
+  const ownCounts = countSymbols(view.hand.map((card) => card.symbol));
+  const estimatedDeck = emptyCounts();
+  for (const symbol of ["rock", "paper", "scissors"] as const) {
+    estimatedDeck[symbol] = Math.max(view.copiesPerSymbol - ownCounts[symbol] - expectedHeld[symbol], 0);
+  }
+  const estimatedDeckTotal = totalCounts(estimatedDeck);
+  const drawProbabilities = emptyCounts();
+  if (estimatedDeckTotal > EPSILON) {
+    for (const symbol of ["rock", "paper", "scissors"] as const) {
+      drawProbabilities[symbol] = estimatedDeck[symbol] / estimatedDeckTotal;
+    }
+  }
+
+  const activeOpponentIds = new Set(
+    view.opponents.filter((opponent) => !opponent.eliminated).map((opponent) => opponent.id)
+  );
+  const activeOpponentCount = Math.max(activeOpponentIds.size, 1);
+  const opponentCounts = new Map<string, { counts: Record<CardSymbol, number>; probability: number }>();
+  for (const opponent of sampled) {
+    if (!activeOpponentIds.has(opponent.id)) continue;
+    for (const hand of opponent.hands) {
+      const key = countKey(hand.counts);
+      const probability = hand.probability / activeOpponentCount;
+      const previous = opponentCounts.get(key);
+      if (previous) previous.probability += probability;
+      else opponentCounts.set(key, { counts: cloneCounts(hand.counts), probability });
+    }
+  }
+  let opponentTypes: BayesianType<readonly CardSymbol[]>[] = [...opponentCounts.values()]
+    .map(({ counts, probability }) => ({
+      probability,
+      actions: orderedSymbolSequences(cloneCounts(counts), 3)
+    }))
+    .filter((type) => type.actions.length > 0);
+  if (opponentTypes.length === 0) {
+    opponentTypes = [{
+      probability: 1,
+      actions: orderedSymbolSequences(emptyCounts(3), 3)
+    }];
+  } else {
+    const probabilityTotal = opponentTypes.reduce((sum, type) => sum + type.probability, 0);
+    opponentTypes = opponentTypes.map((type) => ({
+      ...type,
+      probability: type.probability / probabilityTotal
+    }));
+  }
+
+  return {
+    opponentTypes,
+    drawProbabilities,
+    sampleCount: sampled[0]?.hands.reduce((sum, hand) => sum + hand.samples, 0) ?? 0,
+    showdownValue: Math.max(2, view.copiesPerSymbol - 4) * 10,
+    handValues: new Map()
+  };
+}
+
+function retainedHandValue(
+  hand: readonly Card[],
+  hp: number,
+  model: AdvancedRetentionModel
+): number {
+  const showdown = hand.length === 5
+    && hand[0] !== undefined
+    && hand.every((card) => card.symbol === hand[0]!.symbol);
+  if (showdown) return hp + model.showdownValue;
+  const counts = countSymbols(hand.map((card) => card.symbol));
+  const key = countKey(counts);
+  const cached = model.handValues.get(key);
+  if (cached !== undefined) return hp + cached;
+  const ownSequences = orderedSymbolSequences(cloneCounts(counts), 3);
+  const equilibrium = ownSequences.length === 0
+    ? -3
+    : solveBayesianMaximin(
+        ownSequences,
+        model.opponentTypes,
+        (own, opposing) => sequenceUtility(own, opposing)
+      ).value;
+  model.handValues.set(key, equilibrium);
+  return hp + equilibrium;
+}
+
+function bestAdvancedRetention(
+  hand: readonly Card[],
+  requiredDiscards: number,
+  hp: number,
+  model: AdvancedRetentionModel
+): AdvancedRetentionChoice[] {
+  if (requiredDiscards < 0 || requiredDiscards > hand.length) {
+    throw new Error("Advanced computer discard count is invalid.");
+  }
+  const candidates = cardCombinations(hand, requiredDiscards).map((discarded) => {
+    const discardedIds = new Set(discarded.map((card) => card.id));
+    const remaining = hand.filter((card) => !discardedIds.has(card.id));
+    return { discarded, value: retainedHandValue(remaining, hp, model) };
+  });
+  const bestValue = Math.max(...candidates.map((candidate) => candidate.value));
+  return candidates.filter((candidate) => Math.abs(candidate.value - bestValue) <= 1e-7);
+}
+
+export function chooseAdvancedDraw(
+  view: AdvancedShuffleView,
+  random: RandomSource = Math.random
+): AdvancedDrawAnalysis {
+  const model = buildAdvancedRetentionModel(view, random);
+  const skipChoices = bestAdvancedRetention(view.hand, view.requiredDiscards, view.hp, model);
+  const skipValue = skipChoices[0]!.value;
+  if (view.hp <= 1 || view.deckCount <= 0) {
+    return {
+      purchase: false,
+      skipValue,
+      purchaseValue: null,
+      drawProbabilities: cloneCounts(model.drawProbabilities),
+      sampleCount: model.sampleCount
+    };
+  }
+  let purchaseValue = 0;
+  for (const symbol of ["rock", "paper", "scissors"] as const) {
+    const probability = model.drawProbabilities[symbol];
+    if (probability <= EPSILON) continue;
+    const drawnCard: Card = { id: `advanced-draw-${symbol}`, symbol };
+    const choices = bestAdvancedRetention(
+      [...view.hand, drawnCard],
+      view.requiredDiscards + 1,
+      view.hp - 1,
+      model
+    );
+    purchaseValue += probability * choices[0]!.value;
+  }
+  return {
+    purchase: purchaseValue > skipValue + EPSILON,
+    skipValue,
+    purchaseValue,
+    drawProbabilities: cloneCounts(model.drawProbabilities),
+    sampleCount: model.sampleCount
+  };
+}
+
+export function chooseAdvancedTableDiscards(
+  view: AdvancedShuffleView,
+  random: RandomSource = Math.random
+): string[] {
+  const model = buildAdvancedRetentionModel(view, random);
+  const best = bestAdvancedRetention(view.hand, view.requiredDiscards, view.hp, model);
+  return best[Math.floor(random() * best.length)]!.discarded.map((card) => card.id);
 }
 
 export function chooseAdvancedPair(

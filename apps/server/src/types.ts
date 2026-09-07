@@ -6,7 +6,7 @@ import type {
   PlayedHandMemory,
   PlayerId
 } from "@rps/game-core";
-import type { ActionTimeLimit } from "@rps/protocol";
+import type { ActionTimeLimit, MatchRoundLogView } from "@rps/protocol";
 
 export interface KnownHandObservation {
   symbols: CardSymbol[];
@@ -43,6 +43,7 @@ export interface Room {
   recentBattleLosses: Map<PlayerId, RecentBattleLoss>;
   lastObservedBattleRound: number | null;
   loggedOutcomeGameId: string | null;
+  matchLog: MatchRoundLogView[];
   createdAt: number;
   updatedAt: number;
 }

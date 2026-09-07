@@ -7,8 +7,9 @@ import {
   autoCompleteDiscards,
   autoCompletePreparationPair,
   beginPreparation,
+  chooseAdvancedDraw,
   chooseAdvancedPair,
-  chooseAdvancedDiscards,
+  chooseAdvancedTableDiscards,
   chooseAdvancedTarget,
   chooseComputerDiscards,
   chooseComputerPair,
@@ -28,30 +29,42 @@ import {
   setDiscardSelection,
   shouldComputerPurchaseExtraDraw,
   type AdvancedPairChoice,
+  type AdvancedShuffleView,
+  type BattleSummary,
   type BotDifficulty,
   type CardSymbol,
   type DrawChangeMemory,
   type MatchState,
   type RandomSource
 } from "@rps/game-core";
-import type { ActionTimeLimit, SessionReceipt } from "@rps/protocol";
+import type {
+  ActionTimeLimit,
+  MatchRoundLogView,
+  SessionReceipt
+} from "@rps/protocol";
 import {
   chooseLearnedDiscards,
   chooseLearnedPair,
   shouldLearnedPurchaseExtraDraw
 } from "./learned-ai.js";
+import type {
+  ServerActionEventHandler,
+  ServerActionSource
+} from "./server-log.js";
 import type { GameStudyEventHandler, GameStudyEventType } from "./study-log.js";
 import type { Room, RoomPlayer } from "./types.js";
 
 type RoomChanged = (room: Room) => void;
 
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const BOT_TARGET_THINK_MS = 1_000;
 
 export class RoomManager {
   readonly rooms = new Map<string, Room>();
   private readonly random: RandomSource;
   private onChanged: RoomChanged = () => undefined;
   private onStudyEvent: GameStudyEventHandler = () => undefined;
+  private onServerAction: ServerActionEventHandler = () => undefined;
 
   constructor(random: RandomSource = Math.random) {
     this.random = random;
@@ -63,6 +76,10 @@ export class RoomManager {
 
   setStudyLogHandler(handler: GameStudyEventHandler): void {
     this.onStudyEvent = handler;
+  }
+
+  setServerLogHandler(handler: ServerActionEventHandler): void {
+    this.onServerAction = handler;
   }
 
   createRoom(name: string, socketId: string, now: number): SessionReceipt {
@@ -77,6 +94,7 @@ export class RoomManager {
       recentBattleLosses: new Map(),
       lastObservedBattleRound: null,
       loggedOutcomeGameId: null,
+      matchLog: [],
       createdAt: now,
       updatedAt: now
     };
@@ -182,6 +200,7 @@ export class RoomManager {
       }
     } else if (room.game.phase !== "finished") {
       forfeitPlayers(room.game, [playerId], now, this.random);
+      this.audit(room, now, "player_forfeited", "human", playerId, { reason: "leave" });
       this.playComputers(room, now);
     }
     this.changed(room, now);
@@ -196,31 +215,59 @@ export class RoomManager {
 
   placeCard(roomCode: string, playerId: string, slotIndex: 0 | 1 | 2, cardId: string, now: number): void {
     const room = this.activeRoom(roomCode);
-    setCardPlacement(room.game!, playerId, slotIndex, cardId);
+    const game = room.game!;
+    const card = game.players.find((player) => player.id === playerId)?.hand.find((candidate) => candidate.id === cardId);
+    setCardPlacement(game, playerId, slotIndex, cardId);
+    this.audit(room, now, "card_placed", "human", playerId, { slotIndex, card });
     this.changed(room, now);
   }
 
   adjustHearts(roomCode: string, playerId: string, slotIndex: 0 | 1 | 2, delta: number, now: number): void {
     const room = this.activeRoom(roomCode);
-    adjustSlotHearts(room.game!, playerId, slotIndex, delta);
+    const game = room.game!;
+    adjustSlotHearts(game, playerId, slotIndex, delta);
+    const hearts = game.players.find((player) => player.id === playerId)!.slots[slotIndex].hearts;
+    this.audit(room, now, "hearts_committed", "human", playerId, { slotIndex, delta, hearts });
     this.changed(room, now);
   }
 
   selectDiscards(roomCode: string, playerId: string, cardIds: string[], now: number): void {
     const room = this.activeRoom(roomCode);
-    setDiscardSelection(room.game!, playerId, cardIds);
+    const game = room.game!;
+    const player = game.players.find((candidate) => candidate.id === playerId)!;
+    setDiscardSelection(game, playerId, cardIds);
+    this.audit(room, now, "discard_selection_changed", "human", playerId, {
+      cards: cardIds.map((cardId) => player.hand.find((card) => card.id === cardId)!)
+    });
     this.changed(room, now);
   }
 
   purchaseDraw(roomCode: string, playerId: string, now: number): void {
     const room = this.activeRoom(roomCode);
-    purchaseExtraDraw(room.game!, playerId);
+    const card = purchaseExtraDraw(room.game!, playerId);
+    this.audit(room, now, "extra_card_drawn", "human", playerId, { card, hpCost: 1 });
     this.changed(room, now);
   }
 
   lock(roomCode: string, playerId: string, now: number): void {
     const room = this.activeRoom(roomCode);
-    lockPlayer(room.game!, playerId);
+    const game = room.game!;
+    const phase = game.phase;
+    const lane = game.preparationLane;
+    const player = game.players.find((candidate) => candidate.id === playerId)!;
+    const cardBefore = phase === "preparation" ? player.slots[lane].cardId : null;
+    lockPlayer(game, playerId);
+    const cardAfter = phase === "preparation" ? player.slots[lane].cardId : null;
+    this.audit(room, now, "player_locked", "human", playerId, {
+      phase,
+      ...(phase === "preparation" ? {
+        lane,
+        autoPlacedCard: cardBefore === null && cardAfter !== null
+          ? player.hand.find((card) => card.id === cardAfter)
+          : null,
+        hearts: player.slots[lane].hearts
+      } : { discardSelection: [...player.discardSelection] })
+    });
     this.advanceIfLocked(room, now);
     this.playComputers(room, now);
     assertMatchInvariants(room.game!);
@@ -233,6 +280,7 @@ export class RoomManager {
     const player = room.game!.players.find((candidate) => candidate.id === playerId);
     if (!player) throw new Error("Player is not part of this match.");
     player.rematchRequested = true;
+    this.audit(room, now, "rematch_requested", "human", playerId, {});
     for (const bot of room.game!.players.filter((candidate) => candidate.isBot)) bot.rematchRequested = true;
     if (room.game!.players.every((candidate) => candidate.rematchRequested)) {
       this.startGame(room, now);
@@ -284,7 +332,10 @@ export class RoomManager {
         );
         if (activeExpired.length > 0) {
           forfeitPlayers(room.game, activeExpired.map((player) => player.id), now, this.random);
-          for (const player of activeExpired) player.disconnectedAt = null;
+          for (const player of activeExpired) {
+            player.disconnectedAt = null;
+            this.audit(room, now, "player_forfeited", "system", player.id, { reason: "reconnect_timeout" });
+          }
           this.playComputers(room, now);
         }
       }
@@ -294,15 +345,45 @@ export class RoomManager {
     const game = room.game;
     if (!game || game.phase === "finished" || game.deadlineAt === null || now < game.deadlineAt) return;
     if (game.phase === "targeting") {
-      if (game.defenderId !== null) beginPreparation(game, now);
+      if (game.defenderId !== null) {
+        beginPreparation(game, now);
+        this.audit(room, now, "preparation_started", "system", null, {
+          attackerId: game.attackerId,
+          defenderId: game.defenderId
+        });
+      }
       else this.selectRoomOpponent(room, game.attackerId, clockwiseOpponentId(game), now, "timeout");
     } else if (game.phase === "preparation") {
+      const lane = game.preparationLane;
+      const before = new Map(game.players.map((player) => [player.id, player.slots[lane].cardId]));
       autoCompletePreparationPair(game);
+      this.audit(room, now, "preparation_timed_out", "timeout", null, {
+        lane,
+        placements: game.players
+          .filter((player) => player.id === game.attackerId || player.id === game.defenderId)
+          .map((player) => {
+            const cardId = player.slots[lane].cardId;
+            return {
+              playerId: player.id,
+              wasAutoPlaced: before.get(player.id) === null && cardId !== null,
+              card: player.hand.find((card) => card.id === cardId) ?? null,
+              hearts: player.slots[lane].hearts
+            };
+          })
+      });
       this.advancePreparation(room, now);
     } else if (game.phase === "battle") {
-      advanceBattle(game, now);
+      this.advanceBattleWithAudit(room, now);
     } else if (game.phase === "discard") {
       autoCompleteDiscards(game);
+      this.audit(room, now, "discard_timed_out", "timeout", null, {
+        selections: game.players
+          .filter((player) => player.id === game.attackerId || player.id === game.defenderId)
+          .map((player) => ({
+            playerId: player.id,
+            cards: player.discardSelection.map((cardId) => player.hand.find((card) => card.id === cardId)!)
+          }))
+      });
       this.finalizeRoomDiscards(room, now);
     }
     this.playComputers(room, now);
@@ -317,6 +398,65 @@ export class RoomManager {
     else if (game.phase === "discard") this.finalizeRoomDiscards(room, now);
   }
 
+  private advanceBattleWithAudit(room: Room, now: number): void {
+    const game = room.game!;
+    advanceBattle(game, now);
+    this.audit(room, now, "cards_drawn", "system", null, {
+      players: game.players
+        .filter((player) => player.id === game.attackerId || player.id === game.defenderId)
+        .map((player) => ({
+          playerId: player.id,
+          cards: player.drawnCardIds.map((cardId) => player.hand.find((card) => card.id === cardId)!),
+          requiredDiscards: player.requiredDiscards,
+          bonusDraw: player.noLossBonus
+        }))
+    });
+  }
+
+  private advancedShuffleView(room: Room, playerId: string): AdvancedShuffleView {
+    const game = room.game!;
+    const player = game.players.find((candidate) => candidate.id === playerId)!;
+    return {
+      playerId,
+      hand: player.hand,
+      hp: player.hp,
+      requiredDiscards: player.requiredDiscards,
+      deckCount: game.deck.length,
+      copiesPerSymbol: game.config.copiesPerSymbol,
+      opponents: game.players
+        .filter((opponent) => opponent.id !== playerId && !opponent.eliminated)
+        .map((opponent) => {
+          const observation = room.knownHands.get(opponent.id);
+          const drawChanges = [...(observation?.drawChanges ?? [])];
+          const currentHand = observation?.playedHands.find((hand) => hand.round === game.round);
+          if (
+            currentHand
+            && opponent.drawnCardIds.length > 0
+            && !drawChanges.some((change) => change.round === game.round)
+          ) {
+            drawChanges.push({
+              round: game.round,
+              drawnCount: opponent.drawnCardIds.length,
+              discardedCount: 0,
+              handDelta: opponent.drawnCardIds.length,
+              bonusDraw: opponent.noLossBonus,
+              paidDraw: opponent.extraDrawPurchased
+            });
+          }
+          return {
+            id: opponent.id,
+            eliminated: opponent.eliminated,
+            hp: opponent.hp,
+            handCount: opponent.hand.length,
+            memory: {
+              playedHands: observation?.playedHands ?? [],
+              drawChanges: drawChanges.slice(-2)
+            }
+          };
+        })
+    };
+  }
+
   private selectRoomOpponent(
     room: Room,
     attackerId: string,
@@ -324,8 +464,87 @@ export class RoomManager {
     now: number,
     source: "human" | "timeout" | "automatic" | "basic_bot" | "advanced_bot" | "learned_bot"
   ): void {
-    selectOpponent(room.game!, attackerId, targetId, now);
+    const game = room.game!;
+    selectOpponent(game, attackerId, targetId, now);
+    const attackerIsBot = room.players.find((player) => player.id === attackerId)?.isBot === true;
+    const waitsBeforePunch = attackerIsBot || source === "automatic";
+    if (waitsBeforePunch && game.deadlineAt !== null) game.deadlineAt += BOT_TARGET_THINK_MS;
+    this.ensureRoundLog(room);
     this.study(room, now, "target_selected", { attackerId, targetId, source });
+  }
+
+  private ensureRoundLog(room: Room): MatchRoundLogView {
+    const game = room.game!;
+    const existing = room.matchLog.find((entry) => entry.round === game.round);
+    if (existing) {
+      existing.attackerId = game.attackerId;
+      existing.defenderId = game.defenderId;
+      for (const player of existing.players) {
+        player.role = player.playerId === game.attackerId
+          ? "attacker"
+          : player.playerId === game.defenderId
+            ? "defender"
+            : "idle";
+      }
+      return existing;
+    }
+    const entry: MatchRoundLogView = {
+      round: game.round,
+      attackerId: game.attackerId,
+      defenderId: game.defenderId,
+      players: game.players.map((player) => ({
+        playerId: player.id,
+        role: player.id === game.attackerId
+          ? "attacker"
+          : player.id === game.defenderId
+            ? "defender"
+            : "idle",
+        hpBefore: player.hp,
+        hpAfter: player.hp,
+        handCountBefore: player.hand.length,
+        handCountAfter: player.hand.length,
+        handBeforeDrawDiscard: player.hand.map((card) => card.symbol),
+        playedCards: [null, null, null],
+        hearts: [0, 0, 0],
+        results: [null, null, null],
+        receivedHp: [0, 0, 0],
+        drawnCards: [],
+        discardedCards: [],
+        bonusDraw: false,
+        paidExtraDraw: false,
+        eliminatedAfter: player.eliminated
+      }))
+    };
+    room.matchLog.push(entry);
+    return entry;
+  }
+
+  private recordBattleLog(
+    room: Room,
+    battle: BattleSummary,
+    handsBeforeDrawDiscard: ReadonlyMap<string, CardSymbol[]>
+  ): void {
+    const entry = this.ensureRoundLog(room);
+    const game = room.game!;
+    for (const playerLog of entry.players) {
+      const player = game.players.find((candidate) => candidate.id === playerLog.playerId)!;
+      const battleIndex = battle.duelistIds.indexOf(player.id);
+      const handBefore = handsBeforeDrawDiscard.get(player.id) ?? [];
+      playerLog.handCountBefore = handBefore.length;
+      playerLog.handCountAfter = player.hand.length;
+      playerLog.handBeforeDrawDiscard = [...handBefore];
+      playerLog.hpAfter = player.hp;
+      playerLog.eliminatedAfter = player.eliminated;
+      if (battleIndex < 0) continue;
+      const sides = battle.lanes.map((lane) => lane.sides.find((side) => side.playerId === player.id)!);
+      playerLog.hpBefore = sides.reduce((total, side) => total + side.hearts, 0)
+        + battle.unassignedLost[battleIndex]!;
+      playerLog.hpAfter = battle.resultingHp[battleIndex]!;
+      playerLog.playedCards = sides.map((side) => side.card?.symbol ?? null) as typeof playerLog.playedCards;
+      playerLog.hearts = sides.map((side) => side.hearts) as typeof playerLog.hearts;
+      playerLog.results = sides.map((side) => side.result) as typeof playerLog.results;
+      playerLog.receivedHp = sides.map((side) => side.receivedHp) as typeof playerLog.receivedHp;
+    }
   }
 
   private playComputers(room: Room, now: number): void {
@@ -492,10 +711,28 @@ export class RoomManager {
             });
           }
           setCardPlacement(game, bot.id, game.preparationLane, choice.cardId);
+          this.audit(room, now, "card_placed", "bot", bot.id, {
+            slotIndex: game.preparationLane,
+            card: bot.hand.find((card) => card.id === choice.cardId),
+            difficulty
+          });
           if (game.preparationLane < 2 && choice.hearts > 0) {
             adjustSlotHearts(game, bot.id, game.preparationLane, choice.hearts);
+            this.audit(room, now, "hearts_committed", "bot", bot.id, {
+              slotIndex: game.preparationLane,
+              delta: choice.hearts,
+              hearts: bot.slots[game.preparationLane].hearts,
+              difficulty
+            });
           }
           lockPlayer(game, bot.id);
+          this.audit(room, now, "player_locked", "bot", bot.id, {
+            phase: "preparation",
+            lane: game.preparationLane,
+            card: bot.hand.find((card) => card.id === bot.slots[game.preparationLane].cardId),
+            hearts: bot.slots[game.preparationLane].hearts,
+            difficulty
+          });
           acted = true;
         }
         if (duelistsLocked(game)) {
@@ -510,42 +747,78 @@ export class RoomManager {
         const duelists = game.players.filter((player) =>
           player.id === game.attackerId || player.id === game.defenderId
         );
-        let acted = false;
-        for (const bot of duelists.filter((player) => player.isBot && !player.locked)) {
+        const actionableBots = duelists.filter((player) => player.isBot && !player.locked);
+
+        // Resolve every bot's optional draw before allowing the first bot to
+        // select a discard. Mandatory and clean-sweep draws already happened
+        // together when this phase began.
+        for (const bot of actionableBots) {
           const difficulty = room.players.find((player) => player.id === bot.id)?.botDifficulty;
           const advanced = difficulty === "advanced";
           const learned = difficulty === "learned";
           const recentLoss = room.recentBattleLosses.get(bot.id);
           const survivalMode = recentLoss?.battleRound === game.round && recentLoss.lossRatio >= 0.5;
+          const advancedDraw = advanced
+            ? chooseAdvancedDraw(this.advancedShuffleView(room, bot.id), this.random)
+            : null;
           const purchase = learned
             ? shouldLearnedPurchaseExtraDraw(room, bot.id, this.random)
-            : !advanced && shouldComputerPurchaseExtraDraw(
+            : advanced
+            ? advancedDraw!.purchase
+            : shouldComputerPurchaseExtraDraw(
                 bot.hand,
                 bot.hp,
                 game.deck.length,
                 this.random,
                 survivalMode ? recentLoss.lossRatio : 0
               );
+          this.audit(room, now, "extra_draw_decision", "bot", bot.id, {
+            purchase,
+            difficulty,
+            ...(advancedDraw ? { model: advancedDraw } : {}),
+            handCounts: {
+              rock: bot.hand.filter((card) => card.symbol === "rock").length,
+              paper: bot.hand.filter((card) => card.symbol === "paper").length,
+              scissors: bot.hand.filter((card) => card.symbol === "scissors").length
+            },
+            hp: bot.hp,
+            deckCount: game.deck.length
+          });
           if (purchase) {
-            purchaseExtraDraw(game, bot.id);
+            const card = purchaseExtraDraw(game, bot.id);
+            this.audit(room, now, "extra_card_drawn", "bot", bot.id, { card, hpCost: 1, difficulty });
           }
-          setDiscardSelection(
-            game,
-            bot.id,
-            learned
+        }
+
+        for (const bot of actionableBots) {
+          const difficulty = room.players.find((player) => player.id === bot.id)?.botDifficulty;
+          const advanced = difficulty === "advanced";
+          const learned = difficulty === "learned";
+          const recentLoss = room.recentBattleLosses.get(bot.id);
+          const survivalMode = recentLoss?.battleRound === game.round && recentLoss.lossRatio >= 0.5;
+          const discardIds = learned
               ? chooseLearnedDiscards(room, bot.id, bot.requiredDiscards, this.random)
               : advanced
-              ? chooseAdvancedDiscards(bot.hand, bot.requiredDiscards, this.random)
-              : chooseComputerDiscards(bot.hand, bot.requiredDiscards, this.random, survivalMode)
-          );
+              ? chooseAdvancedTableDiscards(this.advancedShuffleView(room, bot.id), this.random)
+              : chooseComputerDiscards(bot.hand, bot.requiredDiscards, this.random, survivalMode);
+          setDiscardSelection(game, bot.id, discardIds);
+          this.audit(room, now, "discard_selection_changed", "bot", bot.id, {
+            cards: discardIds.map((cardId) => bot.hand.find((card) => card.id === cardId)!),
+            difficulty,
+            survivalMode
+          });
           lockPlayer(game, bot.id);
-          acted = true;
+          this.audit(room, now, "player_locked", "bot", bot.id, {
+            phase: "discard",
+            cards: discardIds.map((cardId) => bot.hand.find((card) => card.id === cardId)!),
+            difficulty
+          });
         }
         if (duelistsLocked(game)) {
           this.finalizeRoomDiscards(room, now);
           continue;
         }
-        if (!acted) return;
+        if (actionableBots.length === 0) return;
         return;
       }
       return;
@@ -557,6 +830,7 @@ export class RoomManager {
     room.recentBattleLosses.clear();
     room.lastObservedBattleRound = null;
     room.loggedOutcomeGameId = null;
+    room.matchLog = [];
     room.game = createMatch(
       randomUUID(),
       room.players.map((player) => ({ id: player.id, name: player.name, isBot: player.isBot })),
@@ -586,12 +860,22 @@ export class RoomManager {
         battleRevealMs: room.game.config.battleRevealMs
       }
     });
+    this.audit(room, now, "initial_cards_drawn", "system", null, {
+      players: room.game.players.map((player) => ({
+        playerId: player.id,
+        cards: player.hand.map((card) => ({ ...card }))
+      }))
+    });
   }
 
   private advancePreparation(room: Room, now: number): void {
     const game = room.game!;
     const completedLane = game.preparationLane;
     const duelistIds = [game.attackerId, game.defenderId!] as const;
+    const handsBeforeDrawDiscard = new Map(game.players.map((player) => [
+      player.id,
+      player.hand.map((card) => card.symbol)
+    ]));
     const battle = advancePreparationPair(game, now, this.random);
     const revealedSides = battle
       ? battle.lanes[completedLane]!.sides.map((side) => ({
@@ -610,6 +894,7 @@ export class RoomManager {
         });
     this.study(room, now, "pair_revealed", { lane: completedLane, sides: revealedSides });
     if (battle) {
+      this.recordBattleLog(room, battle, handsBeforeDrawDiscard);
       this.study(room, now, "battle_resolved", {
         duelistIds: battle.duelistIds,
         lanes: battle.lanes.map((lane) => ({
@@ -685,6 +970,17 @@ export class RoomManager {
       player.id === game.attackerId || player.id === game.defenderId
     );
     const publicChanges: Array<DrawChangeMemory & { playerId: string }> = [];
+    const shuffleLog = duelists.map((player) => ({
+      playerId: player.id,
+      drawnCards: player.drawnCardIds.map((cardId) =>
+        player.hand.find((card) => card.id === cardId)!.symbol
+      ),
+      discardedCards: player.discardSelection.map((cardId) =>
+        player.hand.find((card) => card.id === cardId)!.symbol
+      ),
+      bonusDraw: player.noLossBonus,
+      paidExtraDraw: player.extraDrawPurchased
+    }));
     for (const player of duelists) {
       const memory = room.knownHands.get(player.id);
       const change: DrawChangeMemory = {
@@ -698,7 +994,35 @@ export class RoomManager {
       publicChanges.push({ playerId: player.id, ...change });
       if (memory) memory.drawChanges = [...memory.drawChanges, change].slice(-2);
     }
+    this.audit(room, now, "discards_committed", "system", null, {
+      players: duelists.map((player) => ({
+        playerId: player.id,
+        handBefore: player.hand.map((card) => ({ ...card })),
+        discardedCards: player.discardSelection.map((cardId) =>
+          player.hand.find((card) => card.id === cardId)!
+        ),
+        drawnCards: player.drawnCardIds.map((cardId) =>
+          player.hand.find((card) => card.id === cardId)!
+        ),
+        requiredDiscards: player.requiredDiscards,
+        paidDraw: player.extraDrawPurchased,
+        bonusDraw: player.noLossBonus
+      }))
+    }, resolvedRound);
     const outcome = finalizeDiscards(game, now, this.random);
+    const roundLog = room.matchLog.find((entry) => entry.round === resolvedRound);
+    for (const decision of shuffleLog) {
+      const playerLog = roundLog?.players.find((player) => player.playerId === decision.playerId);
+      const player = game.players.find((candidate) => candidate.id === decision.playerId)!;
+      if (!playerLog) continue;
+      playerLog.drawnCards = decision.drawnCards;
+      playerLog.discardedCards = decision.discardedCards;
+      playerLog.bonusDraw = decision.bonusDraw;
+      playerLog.paidExtraDraw = decision.paidExtraDraw;
+      playerLog.handCountAfter = player.hand.length;
+      playerLog.hpAfter = player.hp;
+      playerLog.eliminatedAfter = player.eliminated;
+    }
     this.study(room, now, "shuffle_resolved", {
       players: publicChanges.map((change) => ({
         ...change,
@@ -772,7 +1096,7 @@ export class RoomManager {
   ): void {
     const game = room.game;
     if (!game) return;
-    this.onStudyEvent({
+    const event = {
       schemaVersion: 1,
       recordedAt: new Date(now).toISOString(),
       timestamp: now,
@@ -781,6 +1105,40 @@ export class RoomManager {
       round,
       type,
       data
+    } as const;
+    this.onStudyEvent(event);
+    this.audit(room, now, type, "system", null, data, round);
+  }
+
+  private audit(
+    room: Room,
+    now: number,
+    type: string,
+    source: ServerActionSource,
+    actorId: string | null,
+    data: Record<string, unknown>,
+    round = room.game?.round ?? 0
+  ): void {
+    const game = room.game;
+    if (!game) return;
+    const state = JSON.parse(JSON.stringify(game)) as Record<string, unknown>;
+    state.players = game.players.map((player) => ({
+      ...(JSON.parse(JSON.stringify(player)) as Record<string, unknown>),
+      botDifficulty: room.players.find((candidate) => candidate.id === player.id)?.botDifficulty ?? null
+    }));
+    this.onServerAction({
+      schemaVersion: 1,
+      visibility: "server_only",
+      recordedAt: new Date(now).toISOString(),
+      timestamp: now,
+      roomCode: room.code,
+      gameId: game.id,
+      round,
+      type,
+      source,
+      actorId,
+      data: JSON.parse(JSON.stringify(data)) as Record<string, unknown>,
+      state
     });
   }
 
@@ -788,6 +1146,13 @@ export class RoomManager {
     const game = room.game;
     if (!game || game.phase !== "finished" || !game.outcome || room.loggedOutcomeGameId === game.id) return;
     room.loggedOutcomeGameId = game.id;
+    const finalRound = this.ensureRoundLog(room);
+    for (const playerLog of finalRound.players) {
+      const player = game.players.find((candidate) => candidate.id === playerLog.playerId)!;
+      playerLog.hpAfter = player.hp;
+      playerLog.handCountAfter = player.hand.length;
+      playerLog.eliminatedAfter = player.eliminated;
+    }
     this.study(room, now, "match_finished", {
       outcome: game.outcome,
       standings: game.players.map((player) => ({

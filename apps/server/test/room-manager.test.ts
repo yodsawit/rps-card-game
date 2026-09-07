@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { seededRandom } from "@rps/game-core";
 import { RoomManager } from "../src/room-manager.js";
 import { snapshotFor } from "../src/snapshots.js";
+import type { ServerActionEvent } from "../src/server-log.js";
 import type { GameStudyEvent } from "../src/study-log.js";
 
 function finishDuelIntro(manager: RoomManager, roomCode: string): void {
@@ -59,13 +60,34 @@ describe("RoomManager", () => {
     expect(lobby.kind === "lobby" && lobby.actionTimeMs).toBeNull();
 
     manager.startRoom(room.code, host.playerId, 1_100);
-    expect(room.game!.deadlineAt).toBe(3_100);
+    expect(room.game!.deadlineAt).toBe(4_100);
     finishDuelIntro(manager, room.code);
     expect(room.game!.phase).toBe("preparation");
     expect(room.game!.deadlineAt).toBeNull();
     expect(room.game!.config.targetSelectionMs).toBeNull();
     expect(room.game!.config.preparationMs).toBeNull();
     expect(room.game!.config.discardMs).toBeNull();
+  });
+
+  it("holds a bot-selected duel for one second before the shared VS animation", () => {
+    const manager = new RoomManager(seededRandom(46));
+    const receipt = manager.createRoom("Bot host", "socket-1", 1_000);
+    manager.addBot(receipt.roomCode, receipt.playerId, 1_010);
+    manager.addBot(receipt.roomCode, receipt.playerId, 1_020);
+    const room = manager.rooms.get(receipt.roomCode)!;
+    room.players[0]!.isBot = true;
+    room.players[0]!.botDifficulty = "basic";
+    room.players[0]!.socketId = null;
+
+    manager.startRoom(room.code, receipt.playerId, 1_100);
+
+    expect(room.game!.phase).toBe("targeting");
+    expect(room.game!.defenderId).not.toBeNull();
+    expect(room.game!.deadlineAt).toBe(4_100);
+    manager.tick(4_099);
+    expect(room.game!.phase).toBe("targeting");
+    manager.tick(4_100);
+    expect(room.game!.phase).toBe("battle");
   });
 
   it("waits in the lobby for human joins and restricts start controls to the host", () => {
@@ -144,6 +166,45 @@ describe("RoomManager", () => {
       })
     });
     expect(JSON.stringify(decision.data)).not.toMatch(/cardId|token|socketId/);
+  });
+
+  it("resolves every bot buy decision after mandatory draws and before any discard", () => {
+    const manager = new RoomManager(seededRandom(74));
+    const serverEvents: ServerActionEvent[] = [];
+    manager.setServerLogHandler((event) => serverEvents.push(event));
+    const receipt = manager.createRoom("ARC host", "socket-1", 1_000);
+    manager.addBot(receipt.roomCode, receipt.playerId, 1_010);
+    const room = manager.rooms.get(receipt.roomCode)!;
+    const host = room.players[0]!;
+    host.isBot = true;
+    host.botDifficulty = "basic";
+    host.socketId = null;
+    manager.startRoom(room.code, receipt.playerId, 1_100);
+    const game = room.game!;
+    for (const player of game.players) {
+      player.hand = player.hand.map((card) => ({ ...card, symbol: "rock" as const }));
+    }
+    game.deck[game.deck.length - 1] = { ...game.deck[game.deck.length - 1]!, symbol: "rock" };
+    game.deck[game.deck.length - 2] = { ...game.deck[game.deck.length - 2]!, symbol: "rock" };
+
+    manager.tick(game.deadlineAt!);
+    expect(game.phase).toBe("battle");
+    manager.tick(game.deadlineAt!);
+
+    const roundEvents = serverEvents.filter((event) => event.round === 1);
+    const mandatoryDrawIndex = roundEvents.findIndex((event) => event.type === "cards_drawn");
+    const decisionIndexes = roundEvents.flatMap((event, index) =>
+      event.type === "extra_draw_decision" ? [index] : []
+    );
+    const discardIndexes = roundEvents.flatMap((event, index) =>
+      event.type === "discard_selection_changed" ? [index] : []
+    );
+    expect(decisionIndexes).toHaveLength(2);
+    expect(roundEvents.filter((event) => event.type === "extra_card_drawn")).toHaveLength(2);
+    expect(discardIndexes).toHaveLength(2);
+    expect(mandatoryDrawIndex).toBeGreaterThanOrEqual(0);
+    expect(Math.min(...decisionIndexes)).toBeGreaterThan(mandatoryDrawIndex);
+    expect(Math.max(...decisionIndexes)).toBeLessThan(Math.min(...discardIndexes));
   });
 
   it("solves an advanced response with every seat occupied", () => {
@@ -255,7 +316,9 @@ describe("RoomManager", () => {
   it("adds public draw-count changes to the shared two-entry bot memory", () => {
     const manager = new RoomManager(seededRandom(62));
     const studyEvents: GameStudyEvent[] = [];
+    const serverEvents: ServerActionEvent[] = [];
     manager.setStudyLogHandler((event) => studyEvents.push(event));
+    manager.setServerLogHandler((event) => serverEvents.push(event));
     const receipt = manager.createRoom("Human", "socket-1", 1_000);
     manager.addBot(receipt.roomCode, receipt.playerId, 1_010);
     manager.joinRoom(receipt.roomCode, "Observer", "socket-2", 1_020);
@@ -276,7 +339,11 @@ describe("RoomManager", () => {
     expect(game.phase).toBe("battle");
     manager.tick(game.deadlineAt!);
     expect(game.phase).toBe("discard");
-    manager.selectDiscards(room.code, human.id, human.hand.slice(0, human.requiredDiscards).map((card) => card.id), 12_100);
+    const drawnCards = human.drawnCardIds.map((cardId) => ({
+      ...human.hand.find((card) => card.id === cardId)!
+    }));
+    const discardedCards = human.hand.slice(0, human.requiredDiscards).map((card) => ({ ...card }));
+    manager.selectDiscards(room.code, human.id, discardedCards.map((card) => card.id), 12_100);
     manager.lock(room.code, human.id, 12_101);
 
     expect(room.knownHands.get(human.id)?.drawChanges).toEqual([{
@@ -305,6 +372,46 @@ describe("RoomManager", () => {
       ])
     });
     expect(JSON.stringify(studyEvents)).not.toMatch(/token|socketId|cardId/);
+
+    const initialDeal = serverEvents.find((event) => event.type === "initial_cards_drawn")!;
+    expect((initialDeal.data.players as Array<{ playerId: string; cards: unknown[] }>).find(
+      (player) => player.playerId === human.id
+    )?.cards).toHaveLength(3);
+    const draw = serverEvents.find((event) => event.type === "cards_drawn")!;
+    const privateDraw = (draw.data.players as Array<{ playerId: string; cards: unknown[] }>).find(
+      (player) => player.playerId === human.id
+    );
+    expect(privateDraw?.cards).toEqual(drawnCards);
+    const committed = serverEvents.find((event) => event.type === "discards_committed")!;
+    const privateDiscard = (committed.data.players as Array<{
+      playerId: string;
+      discardedCards: unknown[];
+      drawnCards: unknown[];
+    }>).find((player) => player.playerId === human.id);
+    expect(privateDiscard).toMatchObject({
+      discardedCards,
+      drawnCards
+    });
+    expect(draw.visibility).toBe("server_only");
+    expect(draw.state).toHaveProperty("deck");
+    expect(draw.state).toHaveProperty("players");
+    expect(JSON.stringify(serverEvents)).toMatch(/"cardId"/);
+    expect(JSON.stringify(serverEvents)).not.toMatch(/token|socketId/);
+
+    const calendarRound = room.matchLog[0]!;
+    const humanRound = calendarRound.players.find((player) => player.playerId === human.id)!;
+    expect(calendarRound).toMatchObject({
+      round: 1,
+      attackerId: human.id,
+      defenderId: bot.id
+    });
+    expect(humanRound.playedCards).toEqual(["rock", "rock", "rock"]);
+    expect(humanRound.handBeforeDrawDiscard).toEqual(["rock", "rock", "rock"]);
+    expect(humanRound.results.every((result) => result !== null)).toBe(true);
+    expect(humanRound.drawnCards).toEqual(drawnCards.map((card) => card.symbol));
+    expect(humanRound.discardedCards).toEqual(discardedCards.map((card) => card.symbol));
+    expect(humanRound.bonusDraw).toBe(true);
+    expect(humanRound.paidExtraDraw).toBe(false);
   });
 
   it("reveals each completed pair to duelists and spectators from left to right", () => {
@@ -392,6 +499,36 @@ describe("RoomManager", () => {
       outcome: { kind: "winner", winnerId: first.playerId, reason: "forfeit" }
     });
     expect(JSON.stringify(finished)).not.toMatch(/token|socketId|cardId/);
+  });
+
+  it("keeps the match calendar private until the match is finished", () => {
+    const manager = new RoomManager(seededRandom(65));
+    const first = manager.createRoom("One", "socket-1", 1_000);
+    const second = manager.joinRoom(first.roomCode, "Two", "socket-2", 1_010);
+    const room = manager.rooms.get(first.roomCode)!;
+    manager.startRoom(room.code, first.playerId, 1_100);
+
+    const live = snapshotFor(room, room.players[0]!, 1_101);
+    expect(live.kind).toBe("match");
+    if (live.kind !== "match") return;
+    expect(live.matchLog).toEqual([]);
+
+    manager.leaveRoom(room.code, second.playerId, 1_200);
+    const finished = snapshotFor(room, room.players[0]!, 1_201);
+    expect(finished.kind).toBe("match");
+    if (finished.kind !== "match") return;
+    expect(finished.phase).toBe("finished");
+    expect(finished.matchLog).toHaveLength(1);
+    expect(finished.matchLog[0]).toMatchObject({
+      round: 1,
+      attackerId: first.playerId,
+      defenderId: second.playerId,
+      players: expect.arrayContaining([
+        expect.objectContaining({ playerId: first.playerId, role: "attacker" }),
+        expect.objectContaining({ playerId: second.playerId, role: "defender", eliminatedAfter: true })
+      ])
+    });
+    expect(JSON.stringify(finished.matchLog)).not.toMatch(/cardId|token|socketId/);
   });
 
   it("uses the next clockwise living opponent when target selection expires", () => {

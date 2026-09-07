@@ -119,7 +119,10 @@ export function snapshotFor(room: Room, viewer: RoomPlayer, now: number): Server
       noLossBonus: self.noLossBonus
     },
     battle: battleView(room.game.battle),
-    outcome: room.game.outcome ? { ...room.game.outcome } : null
+    outcome: room.game.outcome ? { ...room.game.outcome } : null,
+    matchLog: room.game.phase === "finished"
+      ? structuredClone(room.matchLog)
+      : []
   };
   return snapshot;
 }

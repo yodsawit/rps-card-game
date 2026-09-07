@@ -20,6 +20,7 @@ import {
   type SocketData
 } from "@rps/protocol";
 import { RoomManager } from "./room-manager.js";
+import { createJsonlServerLogger } from "./server-log.js";
 import { snapshotFor } from "./snapshots.js";
 import { createJsonlStudyLogger } from "./study-log.js";
 
@@ -43,6 +44,15 @@ const studyLogPath = studyLogDisabled
     ? resolve(configuredStudyLog)
     : resolve(process.cwd(), "../../game-logs/games.jsonl");
 if (studyLogPath) rooms.setStudyLogHandler(createJsonlStudyLogger(studyLogPath));
+const configuredServerLog = process.env.RPS_SERVER_LOG?.trim();
+const serverLogDisabled = configuredServerLog !== undefined
+  && ["0", "false", "off"].includes(configuredServerLog.toLowerCase());
+const serverLogPath = serverLogDisabled
+  ? null
+  : configuredServerLog
+    ? resolve(configuredServerLog)
+    : resolve(process.cwd(), "../../game-logs/server-actions.jsonl");
+if (serverLogPath) rooms.setServerLogHandler(createJsonlServerLogger(serverLogPath));
 
 app.get("/api/health", (_request, response) => {
   response.json({ ok: true, rooms: rooms.rooms.size, now: Date.now() });
@@ -196,6 +206,7 @@ const port = Number(process.env.PORT ?? 3001);
 httpServer.listen(port, "0.0.0.0", () => {
   process.stdout.write(`RPS server listening on http://localhost:${port}\n`);
   if (studyLogPath) process.stdout.write(`Study log: ${studyLogPath}\n`);
+  if (serverLogPath) process.stdout.write(`Private server log: ${serverLogPath}\n`);
 });
 
 const shutdown = (): void => {

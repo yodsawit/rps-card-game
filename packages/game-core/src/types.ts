@@ -94,8 +94,8 @@ export const DEFAULT_GAME_CONFIG: Readonly<GameConfig> = {
   preparationMs: 20_000,
   duelIntroMs: 2_000,
   // The client finishes its reveal/collection sequence in about 9.35 seconds,
-  // leaving roughly 3.65 seconds of static results before drawing begins.
-  battleRevealMs: 13_000,
+  // leaving roughly 1.65 seconds of static results before drawing begins.
+  battleRevealMs: 11_000,
   discardMs: 20_000,
   reconnectMs: 30_000,
   copiesPerSymbol: 6,

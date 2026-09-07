@@ -84,6 +84,32 @@ export interface BattleView {
   eliminatedIds: PlayerId[];
 }
 
+export interface MatchLogPlayerView {
+  playerId: PlayerId;
+  role: "attacker" | "defender" | "idle";
+  hpBefore: number;
+  hpAfter: number;
+  handCountBefore: number;
+  handCountAfter: number;
+  handBeforeDrawDiscard: CardSymbol[];
+  playedCards: [CardSymbol | null, CardSymbol | null, CardSymbol | null];
+  hearts: [number, number, number];
+  results: [LaneResult | null, LaneResult | null, LaneResult | null];
+  receivedHp: [number, number, number];
+  drawnCards: CardSymbol[];
+  discardedCards: CardSymbol[];
+  bonusDraw: boolean;
+  paidExtraDraw: boolean;
+  eliminatedAfter: boolean;
+}
+
+export interface MatchRoundLogView {
+  round: number;
+  attackerId: PlayerId;
+  defenderId: PlayerId | null;
+  players: MatchLogPlayerView[];
+}
+
 export interface LobbySnapshot {
   kind: "lobby";
   roomCode: string;
@@ -117,6 +143,7 @@ export interface MatchSnapshot {
   self: PrivatePlayerView;
   battle: BattleView | null;
   outcome: MatchOutcome | null;
+  matchLog: MatchRoundLogView[];
 }
 
 export type ServerSnapshot = LobbySnapshot | MatchSnapshot;
