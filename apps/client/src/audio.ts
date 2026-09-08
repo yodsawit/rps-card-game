@@ -1,7 +1,8 @@
 import type { CardSymbol } from "@rps/game-core";
 
 const AUDIO_SETTINGS_KEY = "rps-audio-settings-v1";
-const MUSIC_URL = "/audio/claimed-by-the-void-loop.mp3";
+const MUSIC_URL = "/audio/epidemic-home-theme.mp3";
+const MUSIC_BASE_GAIN = 0.25;
 
 interface AudioSettings {
   music: number;
@@ -44,6 +45,7 @@ export class GameAudio {
   private context: AudioContext | null = null;
   private music: HTMLAudioElement | null = null;
   private unlocked = false;
+  private musicVolumeScale = 1;
   private panelOpen = false;
 
   constructor(private readonly controls: HTMLElement) {
@@ -54,8 +56,16 @@ export class GameAudio {
     document.addEventListener("visibilitychange", () => {
       if (!this.music) return;
       if (document.hidden) this.music.pause();
-      else if (this.unlocked && !this.settings.muted && this.settings.music > 0) void this.music.play().catch(() => undefined);
+      else this.syncMusic();
     });
+  }
+
+  setMusicVolumeScale(scale: number): void {
+    const nextScale = clampVolume(scale);
+    if (this.musicVolumeScale === nextScale) return;
+    this.musicVolumeScale = nextScale;
+    if (this.unlocked) this.ensureMusic();
+    this.syncMusic();
   }
 
   playClash(left: CardSymbol, right: CardSymbol): void {
@@ -175,7 +185,9 @@ export class GameAudio {
 
   private syncMusic(): void {
     if (!this.music) return;
-    this.music.volume = this.settings.muted ? 0 : this.settings.music;
+    this.music.volume = this.settings.muted
+      ? 0
+      : this.settings.music * MUSIC_BASE_GAIN * this.musicVolumeScale;
     if (this.settings.muted || this.settings.music <= 0 || document.hidden) {
       this.music.pause();
       return;

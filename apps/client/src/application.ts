@@ -158,6 +158,7 @@ export class RpsClient {
   }
 
   private renderLanding(): void {
+    this.gameAudio.setMusicVolumeScale(1);
     const savedName = escapeHtml(localStorage.getItem(NAME_KEY) ?? "");
     this.app.innerHTML = renderHome(savedName);
     this.app.querySelector<HTMLElement>("[data-action='create']")?.addEventListener("click", () => this.create());
@@ -312,6 +313,7 @@ export class RpsClient {
   }
 
   private renderWaitingRoom(view: LobbySnapshot): void {
+    this.gameAudio.setMusicVolumeScale(1);
     this.app.innerHTML = renderLobby(view);
     this.app.querySelector<HTMLElement>("[data-action='copy']")?.addEventListener("click", async () => {
       await navigator.clipboard.writeText(view.roomCode);
@@ -371,6 +373,8 @@ export class RpsClient {
       && !sequencePending
       && view.outcome !== null
       && !this.presentation.completedOutcomeSequences.has(this.presentation.outcomeKey(view));
+    const resultModalReady = view.phase === "finished" && !sequencePending && !outcomeSequencePending;
+    this.gameAudio.setMusicVolumeScale(resultModalReady ? 1 : 0.5);
     const displayBottomHp = sequencePending ? this.presentation.hpBeforeBattle(view, bottom.id) : bottom.hp;
     const unassigned = view.phase === "preparation" && selfIsDuelist
       ? self.hp - self.slots.reduce((total, slot) => total + slot.hearts, 0)
@@ -384,9 +388,14 @@ export class RpsClient {
             ? this.views.discardPanel(view, self, opponent)
             : this.views.spectatorPanel(view, attacker, defender)
           : this.views.battleBoard(view, self, bottom, opponent, unassigned, displayBottomHp, sequencePending);
+    const layoutClass = view.phase === "targeting" || (view.phase === "finished" && !sequencePending)
+      ? "layout-table"
+      : view.phase === "discard"
+        ? selfIsDuelist ? "layout-discard" : "layout-stage"
+        : "layout-battle";
 
     updateMarkup(this.app, `
-      <main class="match-shell">
+      <main class="match-shell phase-${view.phase} ${layoutClass}">
         <header class="match-header">
           <div class="identity self-id" aria-label="Your player information">
             <strong>${escapeHtml(self.name)}</strong>
@@ -405,7 +414,7 @@ export class RpsClient {
         </header>
         ${body}
       </main>
-      ${view.phase === "finished" && !sequencePending && !outcomeSequencePending ? this.views.resultOverlay(view, self) : ""}
+      ${resultModalReady ? this.views.resultOverlay(view, self) : ""}
     `);
 
     this.bindMatch(view, self, selfIsDuelist);

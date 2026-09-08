@@ -30,6 +30,38 @@ test("disposing the application releases its clock and socket listeners", async 
   expect(state.after).toEqual({ intervals: 0, listeners: 0 });
 });
 
+test("background music follows the page and result volume levels", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await loadClient(page);
+  await page.evaluate(() => Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
+    getItem: () => null, setItem: () => undefined, removeItem: () => undefined
+  } }));
+  await page.evaluate(() => (globalThis as any).reviewClient.connect());
+  expect(await page.evaluate(() => (globalThis as any).audioPageEvents)).toEqual([1]);
+  await page.evaluate((snapshot) => {
+    const client = (globalThis as any).reviewClient;
+    client.snapshot = snapshot;
+    client.render();
+  }, { kind: "lobby", roomCode: "MUSIC", selfPlayerId: "p0", hostPlayerId: "p0", maximumSeats: 6,
+    actionTimeMs: 20_000, players: [{ id: "p0", seatIndex: 0, name: "Arb", isBot: false, botDifficulty: null, connected: true }] });
+  expect(await page.evaluate(() => (globalThis as any).audioPageEvents)).toEqual([1, 1]);
+  await page.evaluate((snapshot) => {
+    const client = (globalThis as any).reviewClient;
+    client.snapshot = snapshot;
+    client.render();
+  }, battleSnapshot());
+  expect(await page.evaluate(() => (globalThis as any).audioPageEvents)).toEqual([1, 1, 0.5]);
+  await page.evaluate((snapshot) => {
+    const client = (globalThis as any).reviewClient;
+    client.snapshot = snapshot;
+    client.render();
+  }, { ...battleSnapshot(), phase: "finished", battle: null,
+    outcome: { kind: "winner", winnerId: "p0", reason: "hp" } });
+  expect(await page.evaluate(() => (globalThis as any).audioPageEvents)).toEqual([1, 1, 0.5, 0.5]);
+  await page.waitForTimeout(1_500);
+  expect(await page.evaluate(() => (globalThis as any).audioPageEvents)).toEqual([1, 1, 0.5, 0.5, 1]);
+});
+
 test("all tutorial slides keep one stable dialog size", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await loadClient(page);
@@ -115,6 +147,147 @@ function discardSnapshot() {
     ], slotCardIds: [null, null, null], drawnCardIds: ["drawn-1"], discardSelection: [],
       requiredDiscards: 1, extraDrawPurchased: false, noLossBonus: false },
     battle: null, outcome: null, matchLog: [], deckCount: 11 };
+}
+
+function preparationSnapshot() {
+  return { kind: "match", phase: "preparation", roomCode: "PHONE", round: 3, serverNow: 0,
+    selfPlayerId: "p0", attackerId: "p0", defenderId: "p1", activeLane: 0, deadlineAt: null,
+    players: players.slice(0, 2), self: {
+      hand: ["rock", "paper", "scissors", "rock", "paper"].map((symbol, index) => ({ symbol, id: `prep-${index}` })),
+      slotCardIds: ["prep-0", null, null], drawnCardIds: [], discardSelection: [], requiredDiscards: 0,
+      extraDrawPurchased: false, noLossBonus: false
+    }, battle: null, outcome: null, matchLog: [], deckCount: 12 };
+}
+
+function targetingSnapshot() {
+  return { kind: "match", phase: "targeting", roomCode: "PHONE", round: 3, serverNow: 0,
+    selfPlayerId: "p0", attackerId: "p0", defenderId: null, activeLane: 0, deadlineAt: null,
+    players, self: {
+      hand: ["rock", "paper", "scissors"].map((symbol, index) => ({ symbol, id: `target-${index}` })),
+      slotCardIds: [null, null, null], drawnCardIds: [], discardSelection: [], requiredDiscards: 0,
+      extraDrawPurchased: false, noLossBonus: false
+    }, battle: null, outcome: null, matchLog: [], deckCount: 12 };
+}
+
+function eliminatedTargetingSnapshot() {
+  const tablePlayers = Array.from({ length: 6 }, (_, index) => ({
+    ...players[index % players.length]!,
+    id: `seat-${index}`,
+    name: index === 0 ? "Arb" : `RL-${index}`,
+    seatIndex: index,
+    hp: index === 0 ? 0 : 5 + index,
+    handCount: index === 0 ? 0 : index === 1 ? 5 : 3,
+    eliminated: index === 0,
+    slots: [{ occupied: false, hearts: 0, symbol: null }, { occupied: false, hearts: 0, symbol: null }, { occupied: false, hearts: 0, symbol: null }]
+  }));
+  return { ...targetingSnapshot(), selfPlayerId: "seat-0", attackerId: "seat-4", defenderId: "seat-5",
+    players: tablePlayers, self: { ...targetingSnapshot().self, hand: [] } };
+}
+
+for (const viewport of [
+  { width: 320, height: 568 },
+  { width: 375, height: 667 },
+  { width: 390, height: 844 },
+  { width: 600, height: 800 },
+  { width: 768, height: 1250 },
+  { width: 844, height: 390 }
+]) {
+  test(`active match phases stay inside a ${viewport.width}x${viewport.height} mobile viewport`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await loadClient(page);
+    const snapshots = [targetingSnapshot(), eliminatedTargetingSnapshot(), preparationSnapshot(), battleSnapshot(), {
+      ...discardSnapshot(),
+      self: {
+        ...discardSnapshot().self,
+        hand: ["rock", "paper", "scissors", "rock", "paper"].map((symbol, index) => ({ symbol, id: index === 4 ? "drawn-1" : `discard-${index}` }))
+      }
+    }];
+    for (const snapshot of snapshots) {
+      const geometry = await page.evaluate((view) => {
+        const client = (globalThis as any).reviewClient;
+        client.snapshot = view;
+        client.render();
+        const shell = document.querySelector<HTMLElement>(".match-shell")!;
+        const required = shell.querySelectorAll<HTMLElement>(
+          ".match-header, .poker-felt, .poker-seat, .duelist-box, .board-card, .player-console, .discard-copy, .discard-hand, .buy-draw, .discard-actions, .opponent-discard-status"
+        );
+        const clipped = [...required].filter((element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.top < -1 || rect.bottom > innerHeight + 1 || rect.left < -1 || rect.right > innerWidth + 1;
+        }).map((element) => element.className);
+        return {
+          phase: (view as any).phase,
+          documentOverflow: document.documentElement.scrollHeight - innerHeight,
+          shellOverflow: shell.scrollHeight - shell.clientHeight,
+          clipped
+        };
+      }, snapshot);
+      expect(geometry, `${geometry.phase} geometry`).toEqual({
+        phase: geometry.phase,
+        documentOverflow: 0,
+        shellOverflow: 0,
+        clipped: []
+      });
+      if ((snapshot as { phase: string }).phase === "preparation") {
+        const actions = await page.locator(".phase-actions").boundingBox();
+        expect(actions).not.toBeNull();
+        expect(viewport.height - actions!.y - actions!.height).toBeLessThan(viewport.height * .15);
+        const outlineGap = await page.evaluate(() => {
+          const lane = document.querySelector<HTMLElement>(".battle-lane.pair-active")!;
+          const duelist = document.querySelector<HTMLElement>(".bottom-duelist")!;
+          const laneRect = lane.getBoundingClientRect();
+          const bottomInset = Number.parseFloat(getComputedStyle(lane, "::before").bottom);
+          return duelist.getBoundingClientRect().top - (laneRect.bottom - bottomInset);
+        });
+        expect(outlineGap).toBeGreaterThanOrEqual(2);
+      }
+    }
+  });
+}
+
+test("phase layout classes leave the desktop match shell sizing unchanged", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await loadClient(page);
+  await page.evaluate((snapshot) => {
+    const client = (globalThis as any).reviewClient;
+    client.snapshot = snapshot;
+    client.render();
+  }, preparationSnapshot());
+  const style = await page.locator(".match-shell").evaluate((element) => {
+    const computed = getComputedStyle(element);
+    return { position: computed.position, display: computed.display, width: Math.round(element.getBoundingClientRect().width) };
+  });
+  expect(style).toEqual({ position: "static", display: "block", width: 1252 });
+});
+
+for (const viewport of [{ width: 768, height: 1250 }, { width: 1280, height: 900 }]) {
+  test(`opponent selection preserves poker geometry at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await loadClient(page);
+    await page.addStyleTag({ content: "*,*::before,*::after{animation:none!important;transition:none!important}" });
+    const base = eliminatedTargetingSnapshot();
+    const tablePlayers = base.players.map((player, index) => ({ ...player, eliminated: false, hp: 10, handCount: index + 1 }));
+    const before = { ...base, selfPlayerId: "seat-0", attackerId: "seat-0", defenderId: null, players: tablePlayers };
+    const after = { ...before, defenderId: "seat-5" };
+    const measurements = await page.evaluate(([first, second]) => {
+      const client = (globalThis as any).reviewClient;
+      const capture = (view: unknown) => {
+        client.snapshot = view;
+        client.render();
+        const rect = (element: Element) => {
+          const box = element.getBoundingClientRect();
+          return { x: box.x, y: box.y, width: box.width, height: box.height };
+        };
+        return {
+          felt: rect(document.querySelector(".poker-felt")!),
+          center: rect(document.querySelector(".target-table-copy")!),
+          seats: [...document.querySelectorAll(".poker-seat")].map(rect)
+        };
+      };
+      return [capture(first), capture(second)];
+    }, [before, after]);
+    expect(measurements[1]).toEqual(measurements[0]);
+  });
 }
 const log = {
   players,

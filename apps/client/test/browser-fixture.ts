@@ -5,6 +5,7 @@ import type { MatchSnapshot, ServerSnapshot } from "@rps/protocol";
 
 const emitted: unknown[][] = [];
 const effectEvents: unknown[][] = [];
+const audioPageEvents: number[] = [];
 const handlers = new Map<string, (...args: any[]) => void>();
 const intervals = new Set<number>();
 const clock = {
@@ -28,7 +29,11 @@ const client = createApplication({
   toast: document.querySelector<HTMLDivElement>("#toast")!,
   socket: socket as unknown as ApplicationDependencies["socket"],
   effects: { events: { emit(...args: unknown[]) { effectEvents.push(args); } } } as unknown as ApplicationDependencies["effects"],
-  audio: new Proxy({}, { get: () => () => {} }) as ApplicationDependencies["audio"]
+  audio: new Proxy({}, {
+    get: (_target, property) => property === "setMusicVolumeScale"
+      ? (scale: number) => audioPageEvents.push(scale)
+      : () => {}
+  }) as ApplicationDependencies["audio"]
 });
 const fixture = {
   snapshot: null as ServerSnapshot | null,
@@ -39,4 +44,4 @@ const fixture = {
   dispose() { client.dispose(); },
   resources() { return { intervals: intervals.size, listeners: handlers.size }; }
 };
-Object.assign(globalThis, { emitted, effectEvents, reviewClient: fixture });
+Object.assign(globalThis, { emitted, effectEvents, audioPageEvents, reviewClient: fixture });

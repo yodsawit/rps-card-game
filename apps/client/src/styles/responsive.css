@@ -1,4 +1,4 @@
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   #audio-controls { right: 9px; bottom: 9px; }
   .audio-panel { width: min(240px, calc(100vw - 24px)); }
   .landing { grid-template-columns: 1fr; gap: 35px; padding: 36px 0; }
@@ -39,7 +39,24 @@
   .lobby-seats { grid-template-columns: 1fr; }
   .lobby-actions { align-items: stretch; flex-direction: column; }
   .lobby-actions .text-button { margin: 7px 0 0; }
-  .match-shell { width: calc(100% - 12px); }
+  /* Match screens are viewport-contained on phones. The phase layout classes
+     keep each screen's controls visible without changing the desktop cascade. */
+  .match-shell {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    display: grid;
+    margin: 0;
+    padding: max(3px, env(safe-area-inset-top)) 6px max(3px, env(safe-area-inset-bottom));
+    overflow: hidden;
+  }
+  .match-shell.layout-table,
+  .match-shell.layout-discard,
+  .match-shell.layout-stage { grid-template-rows: auto minmax(0, 1fr); }
+  .match-shell.layout-battle { grid-template-rows: auto auto auto auto minmax(0, 1fr); align-content: start; }
   .match-header { grid-template-columns: 1fr auto; }
   .self-id { gap: 6px; }
   .self-id > strong { max-width: 52px; font-size: 10px; }
@@ -51,31 +68,67 @@
   .deck-count { font-size: 8px; }
   .round-clock { grid-column: 1 / -1; grid-row: 2; padding: 8px 0; }
   .header-actions { grid-column: 2; grid-row: 1; }
-  .poker-roster { min-height: calc(100vh - 118px); padding: 38px 0 46px; }
-  .poker-felt { width: calc(100% - 142px); height: min(620px, calc(100vh - 220px)); min-height: 450px; border-radius: 50vw; }
+  .layout-table .poker-roster { height: 100%; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 8px; padding: 30px 0 18px; }
+  .layout-table .poker-felt { width: calc(100% - 126px); height: 100%; min-height: 0; border-radius: 50vw; }
+  .layout-table .spectator-note { margin: 0; }
   .poker-seat { width: clamp(108px, 36vw, 138px); padding: 7px; }
   .poker-name-line { gap: 3px; }
   .poker-name-line > strong { font-size: 8px; }
   .card-count-icons i { width: 5px; height: 8px; }
-  .target-stage { min-height: calc(100vh - 150px); }
+  .target-stage { height: 100%; min-height: 0; padding: 16px 10px; overflow: hidden; }
   .target-table-copy h2 { font-size: clamp(22px, 8vw, 34px); }
   .target-table-copy p { max-width: 150px; font-size: 9px; }
-  .duelist-box { max-width: calc(100vw - 28px); gap: 7px; padding-inline: 10px; overflow: hidden; }
+  .duelist-box { width: calc(100% - 16px); max-width: 760px; min-height: 34px; gap: 7px; padding: 5px 10px; overflow: hidden; }
+  .top-duelist { margin-top: 4px; margin-bottom: 2px; }
+  .bottom-duelist { margin-top: 2px; }
   .duelist-role { font-size: 6px; }
-  .battle-grid { gap: 5px; }
-  .board-card { width: clamp(78px, 26vw, 112px); border-radius: 9px; }
+  .battle-grid { min-height: 0; height: auto; align-items: start; gap: 5px; margin: 6px auto 0; }
+  .layout-battle .battle-lane.pair-active::before { inset: 0 -8px 5px; }
+  .battle-lane { grid-template-rows: 15px auto 28px auto 34px; align-content: center; }
+  .pair-phase-label { height: 15px; }
+  .versus-line { min-height: 28px; }
+  .versus-line em { margin-top: -7px; font-size: 6px; }
+  .pair-action-space { height: 34px; }
+  .heart-controls { min-height: 34px; padding-top: 2px; }
+  .heart-controls button { min-width: 36px; height: 32px; padding-inline: 6px; font-size: 10px; }
+  .forced-allocation { min-height: 24px; padding-top: 5px; font-size: 6px; }
+  .board-card { width: clamp(52px, min(22vw, 10dvh), 92px); border-radius: 8px; }
+  .board-card.empty span { font-size: 7px; }
+  .board-card.empty small { margin-top: 3px; font-size: 5px; }
+  .card-corner { top: 5px; left: 7px; font-size: 10px; }
   .heart-badge { right: -4px; bottom: 5px; min-width: 39px; padding: 4px; font-size: 10px; }
   .heart-badge.own { left: -4px; }
-  .hand-card { width: clamp(62px, 18vw, 96px); }
-  .card-name { font-size: 8px; }
-  .phase-actions { flex-direction: column; gap: 9px; }
-  .phase-actions p { text-align: center; }
+  .back-mark { width: clamp(34px, 12vw, 48px); height: clamp(34px, 12vw, 48px); }
+  .back-mark i { font-size: 11px; }
+  .hand-row { gap: clamp(4px, 1.5vw, 8px); }
+  .hand-card { width: clamp(52px, min(16vw, 8dvh), 76px); border-radius: 7px; }
+  .hand-card:hover, .hand-card.selected { transform: translateY(-4px); }
+  .card-name { margin-top: 4px; font-size: 7px; }
+  .commit-mark, .discard-mark { inset-block-end: 8px; padding-block: 3px; font-size: 6px; }
+  .phase-actions { gap: 8px; margin-top: 6px; }
+  .phase-actions p { flex: 1; max-width: 185px; text-align: left; font-size: 8px; line-height: 1.25; }
+  .lock-button { min-width: 132px; padding: 11px 13px; }
   .confirm-dialog section { padding: 28px 18px; }
   .confirm-dialog section > div { flex-direction: column; }
-  .player-console { min-height: 230px; }
-  .discard-stage { padding: 28px 8px 20px; }
-  .discard-hand { flex-wrap: wrap; }
-  .discard-hand .hand-card { width: clamp(75px, 25vw, 115px); }
+  .player-console { min-height: 0; height: 100%; display: flex; flex-direction: column; justify-content: space-evenly; padding: 5px 8px 7px; }
+  .self-summary { height: 29px; flex-basis: 29px; margin-bottom: 4px; }
+  .self-summary strong { font-size: 15px; }
+  .layout-battle .self-summary[aria-hidden="true"] { display: none; }
+  .reveal-message { margin-top: 5px; font-size: 8px; line-height: 1.2; }
+  .discard-stage { height: 100%; min-height: 0; align-content: center; gap: clamp(8px, 1.8dvh, 16px); padding: 10px 8px; overflow: hidden; }
+  .discard-copy .eyebrow { margin-bottom: 3px; }
+  .discard-copy h2 { margin: 2px 0 5px; font-size: clamp(23px, 7vw, 34px); line-height: 1.02; }
+  .discard-copy > p:not(.eyebrow) { margin: 5px 0; font-size: 10px; }
+  .discard-hp { margin-top: 2px; }
+  .discard-hand { width: 100%; flex-wrap: nowrap; gap: clamp(3px, 1.2vw, 6px); }
+  .discard-hand .hand-card { width: clamp(48px, min(17vw, 10dvh), 74px); }
+  .buy-draw { min-width: min(310px, calc(100% - 24px)); margin-top: 0; padding: 9px 14px; }
+  .discard-actions { min-width: min(390px, 100%); flex-direction: row; padding-top: 8px; }
+  .discard-actions p { text-align: right; }
+  .opponent-discard-status { font-size: 8px; }
+  .spectator-stage h2 { max-width: 560px; font-size: clamp(24px, 7vw, 42px); line-height: 1; }
+  .spectator-stage > p:not(.eyebrow) { margin: 4px 0; font-size: 10px; }
+  .spectator-hand { margin-top: 6px; }
   .result-actions { flex-direction: column; }
   .match-log-card { height: calc(100dvh - 12px); grid-template-rows: auto minmax(0, 1fr) 58px; border-radius: 4px 20px 4px 4px; }
   .match-log-header { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 5px 12px; padding: 12px 15px; }
@@ -105,15 +158,149 @@
   .log-nav-button { width: 48px; }
 }
 
-@media (max-width: 760px) and (max-height: 700px) {
-  .match-shell { padding-top: 5px; }
-  .match-header { min-height: 56px; padding-block: 5px; }
-  .round-clock { padding-block: 3px; }
-  .top-duelist { margin-top: 5px; margin-bottom: 4px; }
-  .duelist-box { min-height: 36px; padding-block: 5px; }
-  .board-card { width: clamp(68px, 22vw, 92px); }
-  .versus-line { min-height: 30px; }
-  .back-mark { width: 46px; height: 46px; }
+@media (min-width: 540px) and (max-width: 900px) {
+  .board-card { width: clamp(86px, min(29vw, 17dvh), 210px); }
+  .hand-card { width: clamp(64px, min(15vw, 10dvh), 118px); }
+  .discard-hand .hand-card { width: clamp(74px, min(17vw, 12dvh), 120px); }
+  .poker-seat { width: clamp(128px, 24vw, 168px); }
+  .poker-name-line > strong { font-size: 9px; }
+}
+
+@media (min-width: 540px) and (max-width: 900px) and (max-height: 900px) {
+  .board-card { width: clamp(80px, min(24vw, 12.5dvh), 135px); }
+  .hand-card { width: clamp(60px, min(14vw, 8dvh), 90px); }
+}
+
+@media (max-width: 900px) and (max-height: 700px) {
+  .match-header { min-height: 50px; padding-block: 3px; }
+  .round-clock { padding-block: 2px; }
+  .round-clock strong { margin-block: 1px; font-size: 12px; }
+  .top-duelist { margin-top: 2px; margin-bottom: 1px; }
+  .bottom-duelist { margin-top: 1px; }
+  .duelist-box { min-height: 30px; padding-block: 3px; }
+  .battle-lane { grid-template-rows: 13px auto 24px auto 30px; }
+  .pair-phase-label { height: 13px; }
+  .versus-line { min-height: 24px; }
+  .pair-action-space { height: 30px; }
+  .heart-controls { min-height: 30px; }
+  .heart-controls button { min-width: 34px; height: 28px; }
+  .board-card { width: clamp(50px, min(21vw, 9.5dvh), 70px); }
+  .hand-card { width: clamp(48px, min(15.5vw, 8dvh), 62px); }
+  .back-mark { width: 36px; height: 36px; }
+  .player-console { padding-block: 3px 5px; }
+  .self-summary { height: 25px; flex-basis: 25px; margin-bottom: 2px; }
+  .self-summary small { font-size: 7px; }
+  .self-summary strong { font-size: 13px; }
+  .phase-actions { margin-top: 3px; }
+  .discard-stage { gap: 7px; padding-block: 6px; }
+  .discard-copy h2 { font-size: 22px; }
+  .discard-copy > p:not(.eyebrow) { margin-block: 2px; font-size: 9px; }
+}
+
+/* Compact landscape phones need a height-led layout even though their CSS
+   width can be wider than the portrait breakpoint. */
+@media (max-width: 950px) and (max-height: 520px) {
+  .match-shell {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    display: grid;
+    margin: 0;
+    padding: 2px max(5px, env(safe-area-inset-right)) 2px max(5px, env(safe-area-inset-left));
+    overflow: hidden;
+  }
+  .match-shell.layout-table,
+  .match-shell.layout-discard,
+  .match-shell.layout-stage { grid-template-rows: auto minmax(0, 1fr); }
+  .match-shell.layout-battle { grid-template-rows: auto auto minmax(0, 1fr) auto auto; }
+  .match-header { min-height: 42px; grid-template-columns: 1fr auto 1fr; padding: 2px 10px; }
+  .self-id { gap: 4px; }
+  .self-id > strong { max-width: 80px; font-size: 9px; }
+  .header-private-hand { gap: 2px; }
+  .header-card-symbol { width: 14px; height: 19px; }
+  .header-card-symbol svg { width: 11px; }
+  .self-id .total-hp { margin-left: 2px; font-size: 9px; }
+  .round-clock { grid-column: 2; grid-row: 1; min-width: 120px; padding: 0; }
+  .round-clock small, .deck-count { font-size: 7px; }
+  .round-clock strong { margin: 0; font-size: 11px; }
+  #phase-clock { font-size: 9px; }
+  .header-actions { grid-column: 3; grid-row: 1; gap: 7px; }
+  .icon-button { width: 29px; height: 29px; font-size: 19px; }
+  .duelist-box { width: min(680px, calc(100% - 70px)); min-height: 27px; gap: 6px; padding: 2px 9px; }
+  .top-duelist { margin: 1px auto; }
+  .bottom-duelist { margin: 1px auto 0; }
+  .duelist-role { font-size: 5px; }
+  .duelist-box > strong { font-size: 9px; }
+  .duelist-box .card-count-display > b { font-size: 8px; }
+  .duelist-hp { font-size: 10px; }
+  .battle-grid { min-height: 0; height: 100%; align-items: center; gap: 6px; margin: 0 auto; }
+  .layout-battle .battle-lane.pair-active::before { inset: 0 -6px 3px; }
+  .battle-lane { grid-template-rows: 10px auto 18px auto 18px; align-content: center; }
+  .pair-phase-label { height: 10px; font-size: 5px; }
+  .board-card { width: clamp(42px, 12dvh, 58px); border-radius: 6px; }
+  .board-card.empty span { font-size: 6px; }
+  .board-card.empty small { margin-top: 2px; font-size: 4px; }
+  .card-corner { top: 3px; left: 5px; font-size: 8px; }
+  .card-name { margin-top: 3px; font-size: 5px; }
+  .heart-badge { right: -5px; bottom: 2px; min-width: 31px; padding: 2px 4px; font-size: 8px; }
+  .heart-badge.own { left: -5px; }
+  .back-mark { width: 29px; height: 29px; }
+  .back-mark i { font-size: 8px; }
+  .versus-line { min-height: 18px; }
+  .versus-line b { min-width: 30px; font-size: 7px; }
+  .versus-line em { margin-top: -6px; font-size: 4px; }
+  .pair-action-space { height: 18px; }
+  .heart-controls { min-height: 18px; padding-top: 1px; }
+  .heart-controls button { min-width: 25px; height: 18px; padding: 0 4px; font-size: 7px; }
+  .forced-allocation { min-height: 17px; padding-top: 2px; font-size: 5px; }
+  .player-console { min-height: 0; display: grid; grid-template-columns: minmax(60px, auto) 1fr minmax(180px, auto); align-items: center; gap: 8px; padding: 3px 12px 4px; }
+  .self-summary { height: auto; flex-basis: auto; gap: 6px; margin: 0; }
+  .self-summary small { font-size: 6px; }
+  .self-summary strong { font-size: 12px; }
+  .layout-battle .self-summary[aria-hidden="true"] { display: none; }
+  .hand-row { gap: 4px; }
+  .hand-card { width: clamp(40px, 11dvh, 48px); border-radius: 5px; }
+  .phase-actions { justify-content: flex-end; gap: 6px; margin: 0; }
+  .phase-actions p { max-width: 150px; text-align: right; font-size: 7px; line-height: 1.15; }
+  .lock-button { min-width: 115px; padding: 8px 9px; font-size: 8px; }
+  .reveal-message { grid-column: 3; margin: 0; font-size: 7px; line-height: 1.15; }
+  .layout-table .poker-roster { height: 100%; min-height: 0; padding: 22px 0; }
+  .layout-table .poker-felt { width: min(420px, calc(100% - 250px)); height: calc(100% - 2px); min-height: 0; }
+  .poker-seat { width: clamp(100px, 20vw, 132px); padding: 5px 7px; }
+  .poker-name-line > strong { font-size: 7px; }
+  .poker-seat-copy > small { font-size: 5px; }
+  .target-table-copy h2 { font-size: clamp(19px, 4vw, 28px); }
+  .target-table-copy p { font-size: 7px; }
+  .discard-stage {
+    height: 100%;
+    min-height: 0;
+    grid-template-columns: minmax(210px, .8fr) minmax(390px, 1.2fr);
+    grid-template-rows: minmax(0, 1fr) auto auto;
+    align-content: center;
+    align-items: center;
+    gap: 5px 18px;
+    padding: 7px 18px;
+    overflow: hidden;
+  }
+  .discard-copy { grid-column: 1; grid-row: 1 / 4; }
+  .discard-copy .eyebrow { margin: 0 0 2px; }
+  .discard-copy h2 { margin: 2px 0 5px; font-size: clamp(20px, 3.6vw, 31px); line-height: 1; }
+  .discard-copy > p:not(.eyebrow) { margin: 3px 0; font-size: 8px; }
+  .discard-hp { margin-top: 1px; }
+  .discard-hand { grid-column: 2; grid-row: 1; flex-wrap: nowrap; gap: 4px; }
+  .discard-hand .hand-card { width: clamp(50px, 12dvh, 63px); }
+  .buy-draw { grid-column: 2; grid-row: 2; min-width: min(300px, 100%); margin: 0; padding: 7px 12px; }
+  .discard-actions { grid-column: 2; grid-row: 3; min-width: min(380px, 100%); flex-direction: row; margin: 0; padding-top: 5px; }
+  .discard-actions p { text-align: right; }
+  .opponent-discard-status { grid-column: 1; grid-row: 3; justify-self: center; font-size: 7px; }
+  .target-stage { height: 100%; min-height: 0; padding: 8px; overflow: hidden; }
+  .spectator-stage { gap: 5px; }
+  .spectator-stage h2 { font-size: clamp(22px, 4vw, 36px); }
+  .spectator-stage > p:not(.eyebrow) { margin: 2px 0; font-size: 8px; }
+  .spectator-hand { margin-top: 3px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

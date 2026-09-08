@@ -43,7 +43,7 @@ export class TableViews {
           <span class="seat-number">${player.seatIndex + 1}</span>
           <div class="poker-seat-copy">
             <span class="poker-name-line"><strong>${escapeHtml(player.name)}${player.id === view.selfPlayerId ? " · YOU" : ""}</strong><span class="poker-card-source" data-card-source-player="${player.id}">${cardCountDisplay(player.handCount, "stack")}</span></span>
-            ${stateLabel ? `<small>${stateLabel}</small>` : ""}
+            <small class="${stateLabel ? "" : "seat-state-placeholder"}" ${stateLabel ? "" : 'aria-hidden="true"'}>${stateLabel || "&nbsp;"}</small>
           </div>
           <b>&hearts; ${player.hp}</b>
         </${tag}>`;
@@ -68,7 +68,7 @@ export class TableViews {
             <small>SEAT ${attacker.seatIndex + 1} · ${livingCount} PLAYERS LEFT</small>
             <h2>${introActive ? `${escapeHtml(attacker.name)} vs ${escapeHtml(defender!.name)}` : choosing ? "Choose opponent" : `${escapeHtml(attacker.name)} is choosing`}</h2>
             <p>${introActive ? "Challenge locked. Prepare for the first pair." : choosing ? "Click any living opponent at the table." : "Waiting for the highlighted player."}</p>
-            ${introActive ? "" : '<span class="choosing-dots" aria-hidden="true"><i></i><i></i><i></i></span>'}
+            <span class="choosing-dots ${introActive ? "choosing-dots-placeholder" : ""}" aria-hidden="true"><i></i><i></i><i></i></span>
           </div>
           ${seats}
           ${punch}
